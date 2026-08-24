@@ -10,13 +10,15 @@ class Settings(BaseSettings):
     SESSION_TTL_MINUTES: int = 30
     SENSITIVE_KEYWORDS: list[str] = [
         "송금",
+        "이체",
         "결제",
         "계좌",
         "비밀번호",
-        "주민번호",
         "인증",
-        "카드번호",
         "삭제",
+        "탈퇴",
+        "주민번호",
+        "카드번호",
     ]
 
 
