@@ -1,5 +1,7 @@
 package com.example.pathpilot
 
+import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.widget.Button
@@ -8,23 +10,24 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import com.example.pathpilot.testkit.GoalHolder
+import com.example.pathpilot.settings.WakeWordSettings
+import com.example.pathpilot.ui.permission.PermissionActivity
+import com.example.pathpilot.voice.VoiceInteractionManager
+import com.example.pathpilot.wakeup.WakeAndLaunchActivity
 
 /**
- * 테스트 진입점 — 자연어 목표를 입력받아 [GoalHolder]에 저장하고 카카오톡을 실행한다.
- * 카카오톡이 포그라운드로 올라오면 `testkit.TestAccessibilityService`가 [GoalHolder]에서
- * 이 목표를 읽어 (하드코딩된 DEFAULT_GOAL 대신) 실제 파이프라인을 시작한다.
- *
- * **정식 구현이 아니다.** 접근성/마이크/오버레이 권한은 [ui.permission.PermissionActivity]에서
- * 미리 켜져 있어야 동작한다 — 이 화면은 그 상태를 별도로 확인하지 않는다.
+ * 앱을 열면 곧바로 요청을 받지 않고, 웨이크 문구("안녕 " + [WakeWordSettings]에 저장된 이름, 기본값
+ * "손자")가 들릴 때까지 대기한다. 웨이크 문구를 들으면 그제서야 "네, 말씀하세요"로 실제 요청을
+ * 받고, 받은 요청을 [WakeAndLaunchActivity]에 넘겨 카카오톡 자동화로 이어준다.
  */
 class MainActivity : AppCompatActivity() {
 
-    companion object {
-        private const val KAKAOTALK_PACKAGE = "com.kakao.talk"
-    }
+    private lateinit var voice: VoiceInteractionManager
+    private lateinit var statusText: TextView
+    private lateinit var wakeNameInput: EditText
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -36,33 +39,82 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        val editGoal = findViewById<EditText>(R.id.edit_goal)
-        val statusText = findViewById<TextView>(R.id.text_status)
+        voice = VoiceInteractionManager(this)
+        statusText = findViewById(R.id.text_wake_status)
+        wakeNameInput = findViewById(R.id.input_wake_name)
+        wakeNameInput.setText(WakeWordSettings.getName(this))
 
-        findViewById<Button>(R.id.button_start).setOnClickListener {
-            val goal = editGoal.text?.toString()?.trim()
-            if (goal.isNullOrEmpty()) {
-                Toast.makeText(this, "먼저 무엇을 해야 할지 입력해주세요.", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            GoalHolder.set(goal)
-            statusText.text = "목표 저장됨: $goal"
-            launchKakaoTalk(statusText)
+        findViewById<Button>(R.id.button_save_wake_name).setOnClickListener {
+            WakeWordSettings.setName(this, wakeNameInput.text.toString())
+            wakeNameInput.setText(WakeWordSettings.getName(this))
+            Toast.makeText(
+                this,
+                getString(R.string.main_wake_name_saved, WakeWordSettings.getWakePhrase(this)),
+                Toast.LENGTH_SHORT,
+            ).show()
+            restartWakeListening()
+        }
+
+        findViewById<Button>(R.id.button_start_listening).setOnClickListener { restartWakeListening() }
+        findViewById<Button>(R.id.button_open_permissions).setOnClickListener {
+            startActivity(Intent(this, PermissionActivity::class.java))
         }
     }
 
-    /** 카카오톡을 켠다. 이미 떠 있으면 포그라운드로 올라오고, 꺼져 있으면 콜드 스타트된다. */
-    private fun launchKakaoTalk(statusText: TextView) {
-        val launchIntent = try {
-            packageManager.getLaunchIntentForPackage(KAKAOTALK_PACKAGE)
-        } catch (e: PackageManager.NameNotFoundException) {
-            null
-        }
-        if (launchIntent == null) {
-            statusText.text = "카카오톡이 설치돼 있지 않습니다."
-            Toast.makeText(this, "카카오톡을 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
+    override fun onResume() {
+        super.onResume()
+        restartWakeListening()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        voice.stopWakeListening()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        voice.shutdown()
+    }
+
+    private fun hasMicPermission(): Boolean = ContextCompat.checkSelfPermission(
+        this,
+        Manifest.permission.RECORD_AUDIO,
+    ) == PackageManager.PERMISSION_GRANTED
+
+    private fun restartWakeListening() {
+        if (!hasMicPermission()) {
+            statusText.text = getString(R.string.main_status_need_permission)
             return
         }
-        startActivity(launchIntent)
+
+        val wakePhrase = WakeWordSettings.getWakePhrase(this)
+        statusText.text = getString(R.string.main_status_waiting_wake, wakePhrase)
+        voice.stopWakeListening()
+        voice.startWakeListening(
+            wakePhrase = wakePhrase,
+            onWake = {
+                statusText.text = getString(R.string.main_status_wake_detected)
+                voice.askAndListen(
+                    question = getString(R.string.main_prompt_after_wake),
+                    onAnswer = { goal -> launchKakaoWithGoal(goal) },
+                    onError = {
+                        statusText.text = getString(R.string.main_status_answer_failed)
+                        restartWakeListening()
+                    },
+                )
+            },
+            onError = {
+                // 웨이크 문구 인식이 한 번 틀리는 건 흔한 일이라 상태 텍스트를 계속 바꾸지 않고 조용히 재시도한다.
+            },
+        )
+    }
+
+    private fun launchKakaoWithGoal(goal: String) {
+        statusText.text = getString(R.string.main_status_goal_captured, goal)
+        startActivity(
+            Intent(this, WakeAndLaunchActivity::class.java).apply {
+                putExtra(WakeAndLaunchActivity.EXTRA_GOAL, goal)
+            },
+        )
     }
 }

@@ -1,13 +1,18 @@
 package com.example.pathpilot.voice
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import androidx.core.content.ContextCompat
 import java.util.Locale
 import java.util.UUID
 
@@ -27,6 +32,9 @@ class VoiceInteractionManager(context: Context) {
     private var textToSpeech: TextToSpeech? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private var isTtsReady = false
+
+    private val restartHandler = Handler(Looper.getMainLooper())
+    private var isWakeListening = false
 
     init {
         textToSpeech = TextToSpeech(appContext) { status ->
@@ -61,6 +69,14 @@ class VoiceInteractionManager(context: Context) {
 
     /** 마이크를 켜고 한 문장을 인식한다. 결과/오류를 콜백으로 돌려준다. */
     fun listenOnce(onResult: (String) -> Unit, onError: (String) -> Unit = {}) {
+        val hasMicPermission = ContextCompat.checkSelfPermission(
+            appContext,
+            Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasMicPermission) {
+            onError("마이크 권한이 없습니다. 설정에서 허용해주세요.")
+            return
+        }
         if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
             onError("이 기기에서는 음성 인식을 사용할 수 없습니다.")
             return
@@ -110,16 +126,68 @@ class VoiceInteractionManager(context: Context) {
         }
     }
 
+    /**
+     * "안녕 손자" 같은 웨이크 문구가 들릴 때까지 [listenOnce]를 반복한다. `SpeechRecognizer`는
+     * 한 번에 한 문장만 인식하는 API라 상시 리스닝 엔진이 아니라 "듣고 → 틀리면 잠깐 쉬었다 다시
+     * 듣고"를 반복하는 방식으로 흉내낸다. [wakePhrase]는 공백을 무시하고 대소문자 구분 없이
+     * 부분일치로 비교한다(예: "안녕 손자야"라고 말해도 "안녕 손자"에 매치).
+     */
+    fun startWakeListening(wakePhrase: String, onWake: () -> Unit, onError: (String) -> Unit = {}) {
+        isWakeListening = true
+        listenForWakePhraseOnce(wakePhrase, onWake, onError)
+    }
+
+    private fun listenForWakePhraseOnce(wakePhrase: String, onWake: () -> Unit, onError: (String) -> Unit) {
+        if (!isWakeListening) return
+        listenOnce(
+            onResult = { heard ->
+                if (!isWakeListening) return@listenOnce
+                if (normalizeForMatch(heard).contains(normalizeForMatch(wakePhrase))) {
+                    isWakeListening = false
+                    onWake()
+                } else {
+                    scheduleWakeRelisten(wakePhrase, onWake, onError)
+                }
+            },
+            onError = { err ->
+                if (!isWakeListening) return@listenOnce
+                onError(err)
+                scheduleWakeRelisten(wakePhrase, onWake, onError)
+            },
+        )
+    }
+
+    private fun scheduleWakeRelisten(wakePhrase: String, onWake: () -> Unit, onError: (String) -> Unit) {
+        restartHandler.postDelayed(
+            { listenForWakePhraseOnce(wakePhrase, onWake, onError) },
+            WAKE_RELISTEN_DELAY_MS,
+        )
+    }
+
+    private fun normalizeForMatch(text: String) = text.replace(WHITESPACE_REGEX, "").lowercase(Locale.KOREAN)
+
+    /** [startWakeListening] 루프를 멈춘다. 웨이크 문구를 찾기 전에 화면을 벗어나는 등의 상황에서 쓴다. */
+    fun stopWakeListening() {
+        isWakeListening = false
+        restartHandler.removeCallbacksAndMessages(null)
+        stopListening()
+    }
+
     fun stopListening() {
         speechRecognizer?.destroy()
         speechRecognizer = null
     }
 
     fun shutdown() {
-        stopListening()
+        stopWakeListening()
         textToSpeech?.stop()
         textToSpeech?.shutdown()
         textToSpeech = null
         isTtsReady = false
+    }
+
+    companion object {
+        private const val WAKE_RELISTEN_DELAY_MS = 400L
+        private val WHITESPACE_REGEX = Regex("\\s+")
     }
 }
