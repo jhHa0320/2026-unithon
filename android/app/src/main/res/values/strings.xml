@@ -9,4 +9,18 @@
 
     <!-- 멤버 A: 개인 테스트용 AccessibilityService (카카오톡 사진 전송 시나리오) -->
     <string name="test_accessibility_service_description">테스트용: 카카오톡 화면을 읽고 AI 지시에 따라 클릭합니다.</string>
+
+    <!-- 멤버 A: MainActivity 웨이크 문구("안녕 손자") 설정 -->
+    <string name="main_wake_name_label">\"안녕\" 뒤에 부를 이름</string>
+    <string name="main_wake_name_hint">예: 손자</string>
+    <string name="main_save_wake_name">저장</string>
+    <string name="main_restart_listening">다시 듣기 시작</string>
+    <string name="main_open_permissions">권한 설정으로 이동</string>
+    <string name="main_wake_name_saved">저장했습니다: \"%1$s\"</string>
+    <string name="main_status_need_permission">마이크 권한이 필요합니다. 아래 버튼으로 권한을 허용해주세요.</string>
+    <string name="main_status_waiting_wake">웨이크 문구 대기 중: \"%1$s\"</string>
+    <string name="main_status_wake_detected">인식됨! 요청을 말씀해주세요…</string>
+    <string name="main_prompt_after_wake">네, 말씀하세요.</string>
+    <string name="main_status_answer_failed">요청을 듣지 못했습니다. 다시 웨이크 문구부터 말씀해주세요.</string>
+    <string name="main_status_goal_captured">목표: %1$s</string>
 </resources>
