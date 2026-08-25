@@ -213,7 +213,12 @@ class TestAccessibilityService : AccessibilityService() {
 
         fun visit(node: AccessibilityNodeInfo) {
             val text = node.text?.toString()
+            // Compose 앱(코레일톡 등)은 clickable 컨테이너에 라벨이 없고 그 안의 클릭 불가
+            // TextView에만 "바로 예매" 같은 텍스트가 있는 경우가 많다. 라벨 없는 clickable
+            // 노드를 그대로 보내면 LLM이 어느 버튼인지 알 수 없어 엉뚱한 요소만 반복
+            // 클릭한다(2026-08-26 코레일톡 실측) — 자손 텍스트를 모아 라벨을 합성한다.
             val description = node.contentDescription?.toString()
+                ?: if (node.isClickable && text.isNullOrBlank()) synthesizeLabel(node) else null
             if (node.isClickable || !text.isNullOrBlank() || !description.isNullOrBlank()) {
                 val bounds = Rect()
                 node.getBoundsInScreen(bounds)
@@ -268,6 +273,29 @@ class TestAccessibilityService : AccessibilityService() {
                 cancelAnalyzingIndicator()
             }
         }
+    }
+
+    /**
+     * 자체 text/contentDescription이 없는 clickable 노드의 라벨을 자손 노드의 텍스트로 합성한다.
+     * 자손 전체를 훑되 [SYNTHESIZED_LABEL_MAX_PARTS]개 텍스트까지만 모으고
+     * [SYNTHESIZED_LABEL_MAX_LENGTH]자로 자른다 — 화면 전체를 감싸는 clickable 컨테이너가
+     * 거대한 라벨을 만들지 않게 하기 위해서다. 모을 텍스트가 없으면 null.
+     */
+    private fun synthesizeLabel(node: AccessibilityNodeInfo): String? {
+        val parts = mutableListOf<String>()
+        fun walk(child: AccessibilityNodeInfo) {
+            if (parts.size >= SYNTHESIZED_LABEL_MAX_PARTS) return
+            child.text?.toString()?.takeIf { it.isNotBlank() }?.let { parts.add(it.trim()) }
+            child.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { parts.add(it.trim()) }
+            for (i in 0 until child.childCount) {
+                if (parts.size >= SYNTHESIZED_LABEL_MAX_PARTS) return
+                child.getChild(i)?.let { walk(it) }
+            }
+        }
+        for (i in 0 until node.childCount) {
+            node.getChild(i)?.let { walk(it) }
+        }
+        return parts.joinToString(" ").take(SYNTHESIZED_LABEL_MAX_LENGTH).ifBlank { null }
     }
 
     /** 3초 안에 응답이 오면 스피너를 아예 안 보여준다 — 대부분의 요청(2~3초대)에서는 화면이
@@ -429,6 +457,10 @@ class TestAccessibilityService : AccessibilityService() {
 
         /** 이보다 오래 걸리는 요청에만 "분석 중" 스피너를 보여준다. */
         private const val ANALYZING_INDICATOR_DELAY_MS = 3000L
+
+        /** [synthesizeLabel]이 자손에서 모으는 텍스트 조각 수/길이 상한. */
+        private const val SYNTHESIZED_LABEL_MAX_PARTS = 3
+        private const val SYNTHESIZED_LABEL_MAX_LENGTH = 60
 
         /** STT 인식 실패 시 같은 질문을 다시 묻는 최대 횟수. */
         private const val MAX_ASK_RETRIES = 3
