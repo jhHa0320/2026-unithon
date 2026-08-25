@@ -1,6 +1,7 @@
 package com.example.pathpilot.testkit
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Intent
 import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
@@ -17,6 +18,7 @@ import com.example.pathpilot.model.ElementDTO
 import com.example.pathpilot.network.RetrofitClient
 import com.example.pathpilot.overlay.StatusOverlayManager
 import com.example.pathpilot.voice.VoiceInteractionManager
+import com.example.pathpilot.wakeup.WakeAndLaunchActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -97,7 +99,8 @@ class TestAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         voice = VoiceInteractionManager(this)
         overlay = StatusOverlayManager(this)
-        overlay.onStopClicked = { stopSession() }
+        overlay.onStopClicked = { stopAndListenForNewRequest() }
+        overlay.onExitClicked = { exitApp() }
         Log.i(TAG, "TestAccessibilityService connected (targets=$TARGET_PACKAGES)")
     }
 
@@ -148,11 +151,11 @@ class TestAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * 진행 중인 자동화를 즉시 중단한다 — 오버레이 "그만하기" 버튼과 음성 중단 명령
-     * ([isStopCommand])의 공통 경로. 예약된 화면 스캔·마이크·TTS를 전부 멈추고, 날아가 있는
-     * 서버 응답은 [sessionEpoch] 증가로 무효화한다.
+     * 진행 중인 자동화를 즉시 멈춘다 — 예약된 화면 스캔·마이크·TTS를 전부 멈추고, 날아가 있는
+     * 서버 응답은 [sessionEpoch] 증가로 무효화한다. 이후 무엇을 할지는 호출부가 정한다
+     * ([stopAndListenForNewRequest]는 새 요청 청취, [exitApp]은 서비스 종료).
      */
-    private fun stopSession() {
+    private fun stopSessionCore() {
         sessionEpoch++
         isSessionActive = false
         isAwaitingGoal = false
@@ -165,17 +168,79 @@ class TestAccessibilityService : AccessibilityService() {
         cancelAnalyzingIndicator()
         voice.stopListening()
         voice.stopSpeaking()
-        Log.i(TAG, "사용자 요청으로 세션 중단 (epoch=$sessionEpoch)")
-        voice.speak("네, 중단했어요.")
-        overlay.showOrUpdate("중단했습니다.", showStop = false)
-        overlay.hideAfterDelay(OVERLAY_HIDE_DELAY_MS)
     }
 
-    /** 세션을 조용히 끝낸다(완료/실패 안내 후). 오버레이는 잠시 보여주고 스스로 사라진다. */
+    /**
+     * "중단하기" 버튼과 음성 중단 명령([isStopCommand])의 공통 경로: 하던 일을 멈추고
+     * 곧바로 새 요청을 듣는다(사용자 요구사항 — 중단 후 새로운 요구사항 청취).
+     */
+    private fun stopAndListenForNewRequest() {
+        stopSessionCore()
+        Log.i(TAG, "사용자 요청으로 세션 중단, 새 요청 대기 (epoch=$sessionEpoch)")
+        listenForNewRequest(attempt = 0)
+    }
+
+    private fun listenForNewRequest(attempt: Int) {
+        if (attempt >= MAX_ASK_RETRIES) {
+            endSession("요청을 인식하지 못했습니다. 필요하시면 중단하기 버튼을 다시 눌러주세요.")
+            return
+        }
+        overlay.showOrUpdate("무엇을 도와드릴까요?")
+        voice.askAndListen(
+            question = if (attempt == 0) "네, 멈췄어요. 무엇을 도와드릴까요?" else "무엇을 도와드릴까요?",
+            onAnswer = { answer ->
+                if (isStopCommand(answer)) {
+                    voice.speak("알겠습니다.")
+                    endSession("대기 중입니다. 필요하시면 중단하기 버튼을 눌러주세요.")
+                    return@askAndListen
+                }
+                startRequestedGoal(answer)
+            },
+            onError = { listenForNewRequest(attempt + 1) },
+        )
+    }
+
+    /**
+     * 중단 후 새로 받은 요청을 시작한다. 대상 앱이 지금 떠 있는 앱과 같으면 그 자리에서 바로
+     * 세션을 열고, 다른 앱이면 그 앱을 실행한 뒤 [sessionRequested]/[pendingGoal] 경로로 넘긴다
+     * (웨이크 흐름과 동일한 진입점).
+     */
+    private fun startRequestedGoal(answer: String) {
+        overlay.showOrUpdate("요청: $answer")
+        val target = WakeAndLaunchActivity.resolveTargetPackage(answer)
+        pendingGoal = answer
+        if (target == currentPackage) {
+            beginNewSession()
+            return
+        }
+        val launchIntent = packageManager.getLaunchIntentForPackage(target)
+        if (launchIntent == null) {
+            Log.w(TAG, "$target 를 찾지 못함 (미설치?)")
+            endSession("해당 앱을 찾지 못했습니다.")
+            pendingGoal = null
+            return
+        }
+        sessionRequested = true
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        startActivity(launchIntent)
+    }
+
+    /** "종료하기" 버튼: 자동화를 멈추고 오버레이를 없앤 뒤 접근성 서비스 자체를 끈다.
+     * 다시 쓰려면 설정(또는 adb)에서 접근성 서비스를 다시 켜야 한다. */
+    private fun exitApp() {
+        stopSessionCore()
+        Log.i(TAG, "사용자 요청으로 앱 종료 (disableSelf)")
+        voice.speak("앱을 종료합니다.") {
+            overlay.hide()
+            disableSelf()
+        }
+    }
+
+    /** 세션을 조용히 끝낸다(완료/실패 안내 후). 오버레이는 버튼과 함께 계속 떠 있는다 —
+     * 사용자가 언제든 "중단하기"(새 요청)나 "종료하기"를 누를 수 있게. */
     private fun endSession(message: String) {
         isSessionActive = false
-        overlay.showOrUpdate(message, showStop = false)
-        overlay.hideAfterDelay(OVERLAY_HIDE_DELAY_MS)
+        overlay.showOrUpdate(message)
     }
 
     /**
@@ -202,7 +267,9 @@ class TestAccessibilityService : AccessibilityService() {
             onAnswer = { answer ->
                 isAwaitingGoal = false
                 if (isStopCommand(answer)) {
-                    stopSession()
+                    stopSessionCore()
+                    voice.speak("알겠습니다.")
+                    endSession("대기 중입니다. 필요하시면 중단하기 버튼을 눌러주세요.")
                     return@askAndListen
                 }
                 goal = answer
@@ -447,7 +514,7 @@ class TestAccessibilityService : AccessibilityService() {
      * 바로 처리한다 — 사용자가 멈추라는데 한 번 더 왕복하는 사이 클릭이 나가면 안 되기 때문. */
     private fun routeAnswer(answer: String) {
         if (isStopCommand(answer)) {
-            stopSession()
+            stopAndListenForNewRequest()
             return
         }
         when (classifyAnswer(answer)) {
@@ -542,9 +609,6 @@ class TestAccessibilityService : AccessibilityService() {
 
         /** 세션 하나에서 ASK_USER가 연속으로 나올 수 있는 최대 횟수 — 무한 되묻기 방지. */
         private const val MAX_CONSECUTIVE_ASK_USER = 5
-
-        /** 세션 종료(완료/중단/실패) 안내를 이만큼 보여준 뒤 오버레이를 스스로 치운다. */
-        private const val OVERLAY_HIDE_DELAY_MS = 5000L
 
         /** [isStopCommand]가 보는 중단 명령 키워드. 공백 제거 후 부분 일치로 매칭한다. */
         private val STOP_KEYWORDS = setOf(

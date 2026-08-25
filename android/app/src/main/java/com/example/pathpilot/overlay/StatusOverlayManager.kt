@@ -23,9 +23,9 @@ import android.widget.TextView
  * - [showAnalyzing]: 문구 없이 돌아가는 스피너만 보여준다 — "지금 화면을 분석 중"이라는 뜻을
  *   아이콘으로만 전달한다. 화면 요소 개수 같은 세부 텍스트는 사용자에게 의미가 없어서 뺐다.
  *
- * 진행 중에는 "그만하기" 버튼이 함께 떠서 사용자가 언제든 자동화를 중단할 수 있다 —
- * 버튼을 누르면 [onStopClicked]가 호출된다. 완료/중단 안내처럼 더 이상 멈출 게 없는 상태에서는
- * `showStop = false`로 버튼을 숨기고 [hideAfterDelay]로 잠시 후 오버레이를 치운다.
+ * 오버레이에는 "중단하기"/"종료하기" 버튼이 **항상** 함께 떠 있다(사용자 요구사항) —
+ * 중단하기([onStopClicked])는 지금 하던 일을 멈추고 새 요청을 받는 용도,
+ * 종료하기([onExitClicked])는 앱(접근성 서비스) 자체를 끄는 용도다.
  */
 class StatusOverlayManager(context: Context) {
 
@@ -36,25 +36,25 @@ class StatusOverlayManager(context: Context) {
     private var rootView: LinearLayout? = null
     private var textView: TextView? = null
     private var spinner: ProgressBar? = null
-    private var stopButton: TextView? = null
 
     private val hideHandler = Handler(Looper.getMainLooper())
 
-    /** "그만하기" 버튼을 눌렀을 때 실행할 동작. 서비스 쪽에서 세션 중단 로직을 걸어준다. */
+    /** "중단하기" 버튼을 눌렀을 때 실행할 동작. 서비스 쪽에서 세션 중단+새 요청 청취를 걸어준다. */
     var onStopClicked: (() -> Unit)? = null
+
+    /** "종료하기" 버튼을 눌렀을 때 실행할 동작. 서비스 쪽에서 앱 종료 로직을 걸어준다. */
+    var onExitClicked: (() -> Unit)? = null
 
     /** SYSTEM_ALERT_WINDOW 권한이 있는지 확인 (ui/permission/PermissionActivity에서 요청). */
     fun hasOverlayPermission(): Boolean {
         return Settings.canDrawOverlays(appContext)
     }
 
-    /** 오버레이가 없으면 만들고, 있으면 텍스트 모드로 갱신한다.
-     * [showStop]이 false면 "그만하기" 버튼을 숨긴다 — 완료/중단 안내처럼 멈출 게 없는 상태용. */
-    fun showOrUpdate(message: String, showStop: Boolean = true) {
+    /** 오버레이가 없으면 만들고, 있으면 텍스트 모드로 갱신한다. 버튼 두 개는 항상 떠 있다. */
+    fun showOrUpdate(message: String) {
         ensureViews()
         hideHandler.removeCallbacksAndMessages(null)
         spinner?.visibility = View.GONE
-        stopButton?.visibility = if (showStop) View.VISIBLE else View.GONE
         textView?.apply {
             visibility = View.VISIBLE
             text = message
@@ -66,14 +66,7 @@ class StatusOverlayManager(context: Context) {
         ensureViews()
         hideHandler.removeCallbacksAndMessages(null)
         textView?.visibility = View.GONE
-        stopButton?.visibility = View.VISIBLE
         spinner?.visibility = View.VISIBLE
-    }
-
-    /** [delayMs] 뒤에 오버레이를 치운다. 그 사이 [showOrUpdate]/[showAnalyzing]가 다시 불리면 취소된다. */
-    fun hideAfterDelay(delayMs: Long) {
-        hideHandler.removeCallbacksAndMessages(null)
-        hideHandler.postDelayed({ hide() }, delayMs)
     }
 
     private fun ensureViews() {
@@ -90,39 +83,61 @@ class StatusOverlayManager(context: Context) {
             indeterminateDrawable?.setTint(Color.WHITE)
             visibility = View.GONE
         }
-        val stop = TextView(appContext).apply {
-            // 바깥의 `val text`(메시지 TextView)가 프로퍼티를 가리므로 this를 명시한다.
-            this.text = "그만하기"
-            setTextColor(Color.WHITE)
-            textSize = 18f
-            setPadding(36, 18, 36, 18)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = 28f
-                setColor(Color.parseColor("#E6B3261E"))
+        fun makeButton(label: String, bgColor: String, onClick: () -> Unit) =
+            TextView(appContext).apply {
+                // 바깥의 `val text`(메시지 TextView)가 프로퍼티를 가리므로 this를 명시한다.
+                this.text = label
+                setTextColor(Color.WHITE)
+                textSize = 18f
+                setPadding(36, 18, 36, 18)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = 28f
+                    setColor(Color.parseColor(bgColor))
+                }
+                setOnClickListener { onClick() }
             }
-            setOnClickListener { onStopClicked?.invoke() }
-        }
-        val container = LinearLayout(appContext).apply {
+
+        val stop = makeButton("중단하기", "#E6E07A1F") { onStopClicked?.invoke() }
+        val exit = makeButton("종료하기", "#E6B3261E") { onExitClicked?.invoke() }
+
+        val statusRow = LinearLayout(appContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            addView(
+                progress,
+                LinearLayout.LayoutParams(72, 72).apply { marginEnd = 24 },
+            )
+            addView(text, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+        val buttonRow = LinearLayout(appContext).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(stop, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            addView(
+                exit,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { marginStart = 24 },
+            )
+        }
+        // 문구가 길어져도 버튼이 화면 밖으로 밀리지 않게 문구 줄과 버튼 줄을 세로로 나눈다.
+        val container = LinearLayout(appContext).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding(36, 24, 36, 24)
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = 32f
                 setColor(Color.parseColor("#E6222222"))
             }
+            addView(statusRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
             addView(
-                progress,
-                LinearLayout.LayoutParams(72, 72).apply { marginEnd = 24 },
-            )
-            addView(text, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-            addView(
-                stop,
+                buttonRow,
                 LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT,
-                ).apply { marginStart = 32 },
+                ).apply { topMargin = 20 },
             )
         }
 
@@ -150,7 +165,6 @@ class StatusOverlayManager(context: Context) {
         rootView = container
         textView = text
         spinner = progress
-        stopButton = stop
     }
 
     fun hide() {
@@ -161,6 +175,5 @@ class StatusOverlayManager(context: Context) {
         rootView = null
         textView = null
         spinner = null
-        stopButton = null
     }
 }

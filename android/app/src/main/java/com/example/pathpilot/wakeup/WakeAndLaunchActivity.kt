@@ -38,23 +38,6 @@ class WakeAndLaunchActivity : Activity() {
         finish()
     }
 
-    /**
-     * goal 문장에 어떤 앱을 가리키는 키워드가 있는지 보고 실행할 패키지를 정한다.
-     * **정식 구현이 아니다** — 단순 키워드 매칭이라 "택시 사진 보내줘", "기차역까지 택시 불러줘"
-     * 같은 문장은 오판할 수 있다. "택시"를 먼저 보는 이유: "기차역까지 택시"처럼 기차 키워드가
-     * 장소로만 쓰인 문장에서 택시가 실제 요청인 경우가 반대 경우보다 흔하기 때문.
-     * 지원 앱이 늘어나면 이 when 사슬 대신 LLM이나 별도 분류기로 넘기는 걸 검토할 것.
-     */
-    private fun resolveTargetPackage(goal: String?): String {
-        val text = goal.orEmpty()
-        val lower = text.lowercase()
-        return when {
-            text.contains("택시") -> KAKAOTAXI_PACKAGE
-            KORAIL_KEYWORDS.any { lower.contains(it) } -> KORAIL_PACKAGE
-            else -> KAKAOTALK_PACKAGE
-        }
-    }
-
     override fun onDestroy() {
         super.onDestroy()
         wakeLock?.let { if (it.isHeld) it.release() }
@@ -109,6 +92,25 @@ class WakeAndLaunchActivity : Activity() {
         /** 코레일톡을 가리키는 것으로 보는 키워드. STT가 "KTX"를 "케이티엑스"로 받아쓰는 경우가
          * 있어 둘 다 넣는다. 소문자로 비교하므로 전부 소문자로 적을 것. */
         private val KORAIL_KEYWORDS = listOf("기차", "열차", "코레일", "ktx", "케이티엑스", "승차권", "무궁화호", "새마을호")
+
+        /**
+         * goal 문장에 어떤 앱을 가리키는 키워드가 있는지 보고 실행할 패키지를 정한다.
+         * **정식 구현이 아니다** — 단순 키워드 매칭이라 "택시 사진 보내줘", "기차역까지 택시 불러줘"
+         * 같은 문장은 오판할 수 있다. "택시"를 먼저 보는 이유: "기차역까지 택시"처럼 기차 키워드가
+         * 장소로만 쓰인 문장에서 택시가 실제 요청인 경우가 반대 경우보다 흔하기 때문.
+         * 지원 앱이 늘어나면 이 when 사슬 대신 LLM이나 별도 분류기로 넘기는 걸 검토할 것.
+         * (companion에 둔 이유: 오버레이 "중단하기" 후 새 요청을 받은 TestAccessibilityService도
+         * 같은 규칙으로 대상 앱을 정해야 해서.)
+         */
+        fun resolveTargetPackage(goal: String?): String {
+            val text = goal.orEmpty()
+            val lower = text.lowercase()
+            return when {
+                text.contains("택시") -> KAKAOTAXI_PACKAGE
+                KORAIL_KEYWORDS.any { lower.contains(it) } -> KORAIL_PACKAGE
+                else -> KAKAOTALK_PACKAGE
+            }
+        }
         private const val WAKE_LOCK_TIMEOUT_MS = 10_000L
 
         /** 새로 시작할 세션의 goal을 지정하고 싶을 때 담아 보내는 선택적 extra. */
