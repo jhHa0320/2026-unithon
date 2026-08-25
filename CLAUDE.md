@@ -156,21 +156,36 @@ project-root/
 
 ## 9. AI/LLM 개발 맥락
 
-> (작성 필요 — AI 담당자)
-
-- 사용 모델 및 API:
-- 프롬프트 템플릿 위치 및 버전 관리 방식:
-- 백엔드 `services/ai_client.py`와의 연동 방식:
-- confidence 산출 방식 (모델이 직접 출력 / 별도 계산):
-- Vision fallback 사용 여부 및 트리거 조건:
-- 알려진 제약/이슈:
+- **사용 모델 및 API**: Gemini `gemini-3.7-flash` (Interactions API, `google-genai>=2.3`).
+  모델명·추론 깊이는 `config.py`의 `GEMINI_MODEL` / `GEMINI_THINKING_LEVEL`에서 관리한다.
+  **`gemini-1.5-*`(2025-09-29 종료), `gemini-2.0-*`(2026-06-01 종료)는 사용할 수 없다.**
+  `temperature`/`top_p`/`top_k`는 2026-07-21자로 deprecated — 옛 예제를 복사하지 말 것.
+- **호출 방식**: 백엔드 경유. API 키가 클라이언트에 노출되면 안 되므로 Android는 절대 직접 호출하지 않는다.
+- **프롬프트 템플릿 위치**: `services/prompt.py`. `SYSTEM_INSTRUCTION` + `build_input()`.
+  프롬프트를 바꾸면 `PROMPT_VERSION`을 올린다 — 로그에 함께 기록되므로 정확도 회귀 시 어느 버전인지 추적된다.
+- **`ai_client.py`와의 연동**: `AIClient` Protocol 아래 `MockAIClient`(규칙 기반)와 `GeminiAIClient`(실제 호출) 두 구현체.
+  `routers/decide.py`의 `get_ai_client()`가 `GEMINI_API_KEY` 유무로 고른다 —
+  **키가 없으면 Mock으로 폴백**하므로 키 없는 팀원도 서버를 띄울 수 있다.
+- **LLM 응답 스키마**: `schemas/llm.py`의 `LLMDecision`. 클라이언트 계약(`DecideResponse`)과 의도적으로 분리했다.
+  `UNSUPPORTED`는 서버 판정이라 LLM이 선택할 수 없고, null 대신 센티널(`-1`/`"NONE"`/`""`)을 써서
+  JSON Schema에 `anyOf`가 생기지 않게 했다(프로바이더별 스키마 지원 편차 회피). 변환은 `_to_decide_response()`.
+- **confidence 산출**: 현재는 모델이 직접 출력한다. **단, 자기보고 confidence는 보정이 안 되어 있다** —
+  대부분 0.9 언저리에 몰리고 틀릴 때도 높게 나온다. 실제 결제가 걸린 게이트를 여기에만 맡기지 말 것.
+  보완 신호(유사 후보 수, goal 슬롯 충족 여부, history 반복 탐지)를 `services/safety.py`에 추가할 것 — 미구현.
+- **Vision fallback**: 미사용. 좌석맵이 canvas/이미지라 접근성 라벨이 없을 때만 도입한다(기술설계 Phase 7).
+- **알려진 제약/이슈**:
+  - 라우터의 `asyncio.wait_for`는 대기만 끊고 스레드를 실제로 중단시키지 못한다. 그래서 SDK 레벨 `timeout`(4.5초)을 함께 걸어 라우터 타임아웃(5.0초)보다 먼저 끊기게 해 두었다.
+  - 서버측 실패가 예외 없이 `interaction.status`로 오므로 `_assert_completed()`에서 검사한다.
+  - 프롬프트 캐싱 미적용. 시스템 프롬프트가 매 콜 반복되므로 콜 수가 늘면 도입 검토.
 
 ## 10. 실행 명령어
 
 ### 백엔드
-- `uvicorn backend.main:app --reload --port 8000`
 - `pip install -r requirements.txt`
+- `cp .env.example .env` 후 `GEMINI_API_KEY` 입력 (비워 두면 Mock으로 동작)
+- `uvicorn backend.main:app --reload --port 8000`
 - `pytest backend/tests`
+- Swagger UI: http://127.0.0.1:8000/docs · 에뮬레이터에서 호스트 접근: `http://10.0.2.2:8000`
 
 ### Android
 > (작성 필요 — Android 담당자)

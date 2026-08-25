@@ -10,7 +10,7 @@
 
 ## 🧑‍💻 멤버 B (AI / Backend)
 - [x] **1. 기초 Mock 서버 구축 (가장 먼저!)** 🔗 *전체 팀의 첫 단추* — 계약 v2.0 확정(`dumps/API_SPEC.md`), 29 tests green
-- [ ] **2. Gemini 1.5 Flash API 연동**
+- [x] **2. Gemini API 연동** — `gemini-3.7-flash` + `thinking_level: low`. ⚠️ *1.5 Flash는 2025-09-29 서비스 종료되어 사용 불가 → 최신 세대로 대체함*
 - [ ] **3. UI Tree 분석 프롬프트 엔지니어링** 🔗 *의존: 멤버 C의 UI 덤프 파일*
 - [ ] **4. 사용자 긍정어(Yes/No) 판단 로직 구현**
 
