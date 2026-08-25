@@ -259,6 +259,11 @@ class VoiceInteractionManager(context: Context) {
         stopListening()
     }
 
+    /** 재생 중인 TTS를 즉시 멈춘다 (인스턴스는 유지 — 이후 [speak] 재사용 가능). */
+    fun stopSpeaking() {
+        textToSpeech?.stop()
+    }
+
     fun stopListening() {
         pendingStart?.let { mainHandler.removeCallbacks(it) }
         pendingStart = null

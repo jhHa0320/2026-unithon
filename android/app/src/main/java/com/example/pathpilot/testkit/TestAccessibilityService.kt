@@ -42,8 +42,9 @@ import java.util.UUID
  * 알려진 한계 (테스트 용도라 감수):
  * - [nodeMap]에 담아둔 AccessibilityNodeInfo는 서버 응답이 오는 사이 화면이 바뀌면 무효화될 수
  *   있다. performAction이 조용히 실패하면 이게 원인일 가능성이 높다.
- * - 세션은 [TARGET_PACKAGES] 중 하나의 화면에 들어올 때마다 새로 시작된다. 목표 문장은 [pendingGoal]이 미리 세팅돼
- *   있으면 그걸 쓰고(예: 웨이크업 트리거가 goal을 이미 알고 있는 경우), 없으면 매번 "무엇을
+ * - 세션은 웨이크 흐름이 [sessionRequested]를 세운 뒤 대상 앱 화면이 뜰 때만 시작된다(완료/중단
+ *   후 앱 화면에 남아 있어도 다시 묻지 않는다). 목표 문장은 [pendingGoal]이 미리 세팅돼
+ *   있으면 그걸 쓰고(예: 웨이크업 트리거가 goal을 이미 알고 있는 경우), 없으면 "무엇을
  *   도와드릴까요?"를 TTS로 묻고 STT로 받은 답을 목표로 삼는다 — [startSessionAndCaptureGoal] 참고.
  *   [DEFAULT_GOAL]은 그 STT마저 실패했을 때만 쓰는 최후의 fallback이다.
  * - 완료 판단(status=DONE)을 서버/LLM에 전적으로 맡긴다 — 화면만 보고 "이미 전송했다"를 스스로
@@ -73,6 +74,11 @@ class TestAccessibilityService : AccessibilityService() {
     private var isRequestInFlight = false
     private var consecutiveAskUserCount = 0
 
+    /** 세션 세대 번호. 중단/새 세션마다 올라가고, 서버 응답이 도착했을 때 이 값이 요청 시점과
+     * 다르면(= 그 사이 사용자가 중단했거나 세션이 바뀌었으면) 응답을 버린다 — 중단을 눌렀는데
+     * 날아가 있던 응답이 뒤늦게 도착해 클릭을 실행해버리는 사고 방지. */
+    private var sessionEpoch = 0
+
     /** 지금 세션이 진행 중인 앱. [TARGET_PACKAGES] 중 하나이며, 실제로 이벤트가 들어온 값으로
      * 채워진다 — 하드코딩된 단일 상수가 아니라 "지금 어느 앱 화면인지"를 그대로 반영한다. */
     private var currentPackage: String = TARGET_PACKAGES.first()
@@ -91,6 +97,7 @@ class TestAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         voice = VoiceInteractionManager(this)
         overlay = StatusOverlayManager(this)
+        overlay.onStopClicked = { stopSession() }
         Log.i(TAG, "TestAccessibilityService connected (targets=$TARGET_PACKAGES)")
     }
 
@@ -112,16 +119,63 @@ class TestAccessibilityService : AccessibilityService() {
         val packageChanged = eventPackage != currentPackage
         currentPackage = eventPackage
 
-        if (!isSessionActive || packageChanged) {
-            isSessionActive = true
-            sessionId = UUID.randomUUID().toString()
-            consecutiveAskUserCount = 0
-            startSessionAndCaptureGoal()
+        if (!isSessionActive) {
+            // 세션이 없을 때는 웨이크 흐름([sessionRequested])이 명시적으로 요청한 경우에만 새로
+            // 시작한다. 예전엔 대상 앱 화면이기만 하면 무조건 세션을 열어서, 완료/중단 후에도
+            // 사용자가 앱을 계속 쓰는 동안 "무엇을 도와드릴까요?"를 반복해 묻고 마이크를 계속
+            // 열어뒀다(2026-08-26 보고: "계속 사용자 입력을 대기하는 것 같다").
+            if (!sessionRequested) return
+            sessionRequested = false
+            beginNewSession()
+            return
+        }
+
+        if (packageChanged) {
+            beginNewSession()
             return
         }
 
         if (isAwaitingGoal) return
         scheduleCollectAndDecide()
+    }
+
+    private fun beginNewSession() {
+        isSessionActive = true
+        sessionEpoch++
+        sessionId = UUID.randomUUID().toString()
+        consecutiveAskUserCount = 0
+        startSessionAndCaptureGoal()
+    }
+
+    /**
+     * 진행 중인 자동화를 즉시 중단한다 — 오버레이 "그만하기" 버튼과 음성 중단 명령
+     * ([isStopCommand])의 공통 경로. 예약된 화면 스캔·마이크·TTS를 전부 멈추고, 날아가 있는
+     * 서버 응답은 [sessionEpoch] 증가로 무효화한다.
+     */
+    private fun stopSession() {
+        sessionEpoch++
+        isSessionActive = false
+        isAwaitingGoal = false
+        sessionRequested = false
+        pendingGoal = null
+        consecutiveAskUserCount = 0
+        pendingCollect?.let { debounceHandler.removeCallbacks(it) }
+        pendingCollect = null
+        firstEventInBurstAt = null
+        cancelAnalyzingIndicator()
+        voice.stopListening()
+        voice.stopSpeaking()
+        Log.i(TAG, "사용자 요청으로 세션 중단 (epoch=$sessionEpoch)")
+        voice.speak("네, 중단했어요.")
+        overlay.showOrUpdate("중단했습니다.", showStop = false)
+        overlay.hideAfterDelay(OVERLAY_HIDE_DELAY_MS)
+    }
+
+    /** 세션을 조용히 끝낸다(완료/실패 안내 후). 오버레이는 잠시 보여주고 스스로 사라진다. */
+    private fun endSession(message: String) {
+        isSessionActive = false
+        overlay.showOrUpdate(message, showStop = false)
+        overlay.hideAfterDelay(OVERLAY_HIDE_DELAY_MS)
     }
 
     /**
@@ -147,6 +201,10 @@ class TestAccessibilityService : AccessibilityService() {
             question = "무엇을 도와드릴까요?",
             onAnswer = { answer ->
                 isAwaitingGoal = false
+                if (isStopCommand(answer)) {
+                    stopSession()
+                    return@askAndListen
+                }
                 goal = answer
                 overlay.showOrUpdate("목표: $goal")
                 scheduleCollectAndDecide()
@@ -258,16 +316,23 @@ class TestAccessibilityService : AccessibilityService() {
             elements = elements,
             user_speech = userSpeech,
         )
+        val requestEpoch = sessionEpoch
 
         serviceScope.launch {
             try {
                 val response = withContext(Dispatchers.IO) {
                     RetrofitClient.apiService.decide(request)
                 }
-                handleResponse(response)
+                if (requestEpoch != sessionEpoch) {
+                    Log.i(TAG, "중단/세션 교체 후 도착한 응답 무시 (epoch $requestEpoch != $sessionEpoch)")
+                } else {
+                    handleResponse(response)
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "decide 호출 실패", e)
-                overlay.showOrUpdate("서버 호출 실패: ${e.message}")
+                if (requestEpoch == sessionEpoch) {
+                    overlay.showOrUpdate("서버 호출 실패: ${e.message}")
+                }
             } finally {
                 isRequestInFlight = false
                 cancelAnalyzingIndicator()
@@ -327,8 +392,7 @@ class TestAccessibilityService : AccessibilityService() {
             DecideStatus.ASK_USER -> {
                 consecutiveAskUserCount++
                 if (consecutiveAskUserCount > MAX_CONSECUTIVE_ASK_USER) {
-                    overlay.showOrUpdate("답변을 계속 이해하지 못해 중단합니다.")
-                    isSessionActive = false
+                    endSession("답변을 계속 이해하지 못해 중단합니다.")
                     return
                 }
                 overlay.showOrUpdate("답변 대기: ${response.voice_message}")
@@ -340,8 +404,7 @@ class TestAccessibilityService : AccessibilityService() {
                 if (response.voice_message.isNotBlank()) {
                     voice.speak(response.voice_message)
                 }
-                overlay.showOrUpdate("완료: ${response.voice_message}")
-                isSessionActive = false
+                endSession("완료: ${response.voice_message}")
             }
 
             DecideStatus.UNSUPPORTED -> {
@@ -349,8 +412,7 @@ class TestAccessibilityService : AccessibilityService() {
                 if (response.voice_message.isNotBlank()) {
                     voice.speak(response.voice_message)
                 }
-                overlay.showOrUpdate("중단됨: ${response.reason ?: response.voice_message}")
-                isSessionActive = false
+                endSession("중단됨: ${response.reason ?: response.voice_message}")
             }
         }
     }
@@ -362,8 +424,7 @@ class TestAccessibilityService : AccessibilityService() {
      */
     private fun askUserWithRetry(question: String, attempt: Int) {
         if (attempt >= MAX_ASK_RETRIES) {
-            overlay.showOrUpdate("답변을 인식하지 못했습니다.")
-            isSessionActive = false
+            endSession("답변을 인식하지 못했습니다.")
             return
         }
         voice.askAndListen(
@@ -381,8 +442,14 @@ class TestAccessibilityService : AccessibilityService() {
         )
     }
 
-    /** 답변이 정보 제공형이면 goal에 누적, 확인 응답이면 user_speech로 일회성 전달한다 (CLAUDE.md §5-1). */
+    /** 답변이 중단 명령이면 즉시 세션을 끝내고, 정보 제공형이면 goal에 누적, 확인 응답이면
+     * user_speech로 일회성 전달한다 (CLAUDE.md §5-1). 중단 명령은 서버를 거치지 않고 클라이언트가
+     * 바로 처리한다 — 사용자가 멈추라는데 한 번 더 왕복하는 사이 클릭이 나가면 안 되기 때문. */
     private fun routeAnswer(answer: String) {
+        if (isStopCommand(answer)) {
+            stopSession()
+            return
+        }
         when (classifyAnswer(answer)) {
             AnswerType.CONFIRMATION -> collectAndDecide(userSpeech = answer)
             AnswerType.INFO -> {
@@ -390,6 +457,14 @@ class TestAccessibilityService : AccessibilityService() {
                 collectAndDecide(userSpeech = null)
             }
         }
+    }
+
+    /** "그만"/"취소"/"중단"류 발화인지. 공백을 지운 뒤 키워드 포함 여부로 본다 — STT가 "그만 해줘"처럼
+     * 띄어쓰기를 섞어도 잡힌다. 정보 제공형 답변에 이 단어들이 들어갈 일은 이 도메인에선 드물다고 보고
+     * 단순 포함 매칭을 쓴다(오탐이 관찰되면 정확 일치 목록으로 좁힐 것). */
+    private fun isStopCommand(text: String): Boolean {
+        val normalized = text.replace(Regex("\\s+"), "")
+        return STOP_KEYWORDS.any { normalized.contains(it) }
     }
 
     /**
@@ -468,11 +543,19 @@ class TestAccessibilityService : AccessibilityService() {
         /** 세션 하나에서 ASK_USER가 연속으로 나올 수 있는 최대 횟수 — 무한 되묻기 방지. */
         private const val MAX_CONSECUTIVE_ASK_USER = 5
 
+        /** 세션 종료(완료/중단/실패) 안내를 이만큼 보여준 뒤 오버레이를 스스로 치운다. */
+        private const val OVERLAY_HIDE_DELAY_MS = 5000L
+
+        /** [isStopCommand]가 보는 중단 명령 키워드. 공백 제거 후 부분 일치로 매칭한다. */
+        private val STOP_KEYWORDS = setOf(
+            "취소", "그만", "중단", "멈춰", "멈춰줘", "스톱", "스탑", "하지마", "종료",
+        )
+
+        // 취소/그만류는 STOP_KEYWORDS가 먼저 잡으므로 여기엔 없다.
         private val CONFIRMATION_ANSWERS = setOf(
             "응", "네", "예", "넵", "웅", "맞아", "맞아요", "그래", "그래요",
             "좋아", "좋아요", "오케이", "콜", "진행", "진행해줘", "진행해주세요",
             "아니", "아니요", "아니오", "노", "안돼", "안 돼", "싫어",
-            "취소", "취소해줘", "취소해주세요", "그만", "그만해줘",
         )
 
         /**
@@ -484,5 +567,14 @@ class TestAccessibilityService : AccessibilityService() {
          */
         @Volatile
         var pendingGoal: String? = null
+
+        /**
+         * [com.example.pathpilot.wakeup.WakeAndLaunchActivity]가 "이제 자동화 세션을 시작해도
+         * 된다"고 알리는 신호. [pendingGoal]과 달리 goal이 없어도(=서비스가 TTS로 되물어야 하는
+         * 경우에도) 세워진다. 이 신호 없이는 대상 앱 화면에 있어도 세션을 시작하지 않는다 —
+         * 완료/중단 후 사용자가 앱을 계속 쓰는 동안 "무엇을 도와드릴까요?"를 반복해 묻던 문제의 수정.
+         */
+        @Volatile
+        var sessionRequested: Boolean = false
     }
 }

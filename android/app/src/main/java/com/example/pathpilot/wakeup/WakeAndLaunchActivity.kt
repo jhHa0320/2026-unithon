@@ -32,6 +32,8 @@ class WakeAndLaunchActivity : Activity() {
 
         val goal = intent.getStringExtra(EXTRA_GOAL)
         TestAccessibilityService.pendingGoal = goal
+        // goal이 null이어도 세션 시작 자체는 요청한다 — 서비스가 TTS로 목표를 되물어서 진행한다.
+        TestAccessibilityService.sessionRequested = true
         launchTargetApp(resolveTargetPackage(goal))
         finish()
     }
