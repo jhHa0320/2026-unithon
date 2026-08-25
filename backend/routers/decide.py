@@ -1,5 +1,6 @@
 import asyncio
 import time
+from functools import lru_cache
 
 from fastapi import APIRouter, Depends
 
@@ -7,19 +8,54 @@ from backend.config import Settings, get_settings
 from backend.core.logging import get_logger
 from backend.schemas.request import DecideRequest
 from backend.schemas.response import DecideResponse
-from backend.services import safety
-from backend.services.ai_client import AIClient, MockAIClient
+from backend.services import prompt, safety
+from backend.services.ai_client import (
+    AIClient,
+    AIClientError,
+    GeminiAIClient,
+    MockAIClient,
+)
 from backend.services.session import session_manager
 
 router = APIRouter(prefix="/api/v1", tags=["decide"])
 logger = get_logger(__name__)
 
-AI_CLIENT_TIMEOUT_SECONDS = 5.0
+# SDK의 HTTP deadline(GEMINI_TIMEOUT_SECONDS, 하한 10초)보다 반드시 커야 한다.
+# 그래야 HTTP가 먼저 끊기고 스레드가 풀린다 — asyncio.wait_for는 대기만 중단할 뿐
+# to_thread로 띄운 스레드를 실제로 끊지 못하기 때문이다.
+# 실측 응답은 2초대이므로 이 값은 예산이 아니라 안전망이다.
+AI_CLIENT_TIMEOUT_SECONDS = 12.0
 
 
-def get_ai_client() -> AIClient:
-    """AI 클라이언트 주입 지점. B-2에서 GeminiAIClient로 교체하면 나머지는 그대로 동작한다."""
-    return MockAIClient()
+@lru_cache(maxsize=1)
+def _build_ai_client(
+    api_key: str | None, model: str, thinking_level: str, timeout_seconds: float
+) -> AIClient:
+    """클라이언트를 프로세스당 한 번만 만든다. 요청마다 생성하면 커넥션이 낭비된다."""
+    if not api_key:
+        logger.warning("GEMINI_API_KEY not set — falling back to MockAIClient")
+        return MockAIClient()
+
+    logger.info(
+        "using GeminiAIClient",
+        extra={"model": model, "thinking_level": thinking_level, "timeout_s": timeout_seconds},
+    )
+    return GeminiAIClient(
+        api_key=api_key,
+        model=model,
+        thinking_level=thinking_level,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def get_ai_client(settings: Settings = Depends(get_settings)) -> AIClient:
+    """AI 클라이언트 주입 지점. 키가 없으면 Mock으로 폴백해 서버가 항상 뜨게 한다."""
+    return _build_ai_client(
+        settings.GEMINI_API_KEY,
+        settings.GEMINI_MODEL,
+        settings.GEMINI_THINKING_LEVEL,
+        settings.GEMINI_TIMEOUT_SECONDS,
+    )
 
 
 @router.post("/decide", response_model=DecideResponse)
@@ -68,6 +104,20 @@ async def decide(
             status="UNSUPPORTED",
             reason="AI 응답 지연",
         )
+    except AIClientError as exc:
+        # LLM 호출/파싱 실패. 서버가 죽지 않고 계약대로 응답한다(CLAUDE.md 12장).
+        # 상세 사유는 로그로만 남기고 응답 본문에는 넣지 않는다.
+        logger.warning("ai client failed", extra={"detail": str(exc)})
+        response = DecideResponse(
+            target_node_id=None,
+            action_type=None,
+            input_value=None,
+            instruction="AI 호출에 실패해 이번 단계를 처리할 수 없음",
+            voice_message="죄송해요, 지금은 화면을 읽지 못했어요. 다시 시도해 주세요.",
+            confidence=0.0,
+            status="UNSUPPORTED",
+            reason="AI 호출 실패",
+        )
     else:
         # 6. confidence 게이트 — 임계값 미만이면 ASK_USER로 강제 override
         response = safety.check_confidence(response, settings.CONFIDENCE_THRESHOLD)
@@ -90,6 +140,7 @@ async def decide(
             "elements_count": len(request.elements),
             "sensitive_elements_count": len(sensitive_elements),
             "has_user_speech": request.user_speech is not None,
+            "prompt_version": prompt.PROMPT_VERSION,
             "latency_ms": latency_ms,
         },
     )

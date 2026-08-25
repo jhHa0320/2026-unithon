@@ -3,5 +3,6 @@ uvicorn[standard]
 pydantic>=2
 pydantic-settings
 python-dotenv
+google-genai>=2.3
 pytest
 httpx
