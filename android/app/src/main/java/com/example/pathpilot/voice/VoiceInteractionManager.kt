@@ -1,13 +1,16 @@
 package com.example.pathpilot.voice
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import androidx.core.content.ContextCompat
 import java.util.Locale
 import java.util.UUID
 
@@ -61,6 +64,14 @@ class VoiceInteractionManager(context: Context) {
 
     /** 마이크를 켜고 한 문장을 인식한다. 결과/오류를 콜백으로 돌려준다. */
     fun listenOnce(onResult: (String) -> Unit, onError: (String) -> Unit = {}) {
+        val hasMicPermission = ContextCompat.checkSelfPermission(
+            appContext,
+            Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasMicPermission) {
+            onError("마이크 권한이 없습니다. 설정에서 허용해주세요.")
+            return
+        }
         if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
             onError("이 기기에서는 음성 인식을 사용할 수 없습니다.")
             return

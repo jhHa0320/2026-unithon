@@ -51,6 +51,10 @@ class TestAccessibilityService : AccessibilityService() {
     private var goal: String = DEFAULT_GOAL
     private var isSessionActive = false
     private var isRequestInFlight = false
+    private var consecutiveAskUserCount = 0
+
+    /** ASK_USER 답변의 종류. CLAUDE.md §5-1 참고: 정보 제공형은 goal에 누적, 확인 응답은 user_speech로 일회성 전달. */
+    private enum class AnswerType { INFO, CONFIRMATION }
 
     /** 이번 스텝에서 화면을 훑을 때 부여한 id -> 실제 노드. §알려진 한계 참고. */
     private val nodeMap = mutableMapOf<Int, AccessibilityNodeInfo>()
@@ -73,6 +77,7 @@ class TestAccessibilityService : AccessibilityService() {
             isSessionActive = true
             sessionId = UUID.randomUUID().toString()
             goal = DEFAULT_GOAL
+            consecutiveAskUserCount = 0
             overlay.showOrUpdate("테스트 시작: $goal")
         }
 
@@ -167,35 +172,88 @@ class TestAccessibilityService : AccessibilityService() {
     }
 
     private fun handleResponse(response: DecideResponse) {
-        if (response.voice_message.isNotBlank()) {
-            voice.speak(response.voice_message)
-        }
-
         when (response.status) {
             DecideStatus.CONTINUE -> {
+                consecutiveAskUserCount = 0
+                if (response.voice_message.isNotBlank()) {
+                    voice.speak(response.voice_message)
+                }
                 overlay.showOrUpdate(response.voice_message.ifBlank { "다음 동작 실행 중" })
                 performTargetAction(response)
                 // 클릭/입력 후 화면이 바뀌면 onAccessibilityEvent가 다시 스케줄링한다.
             }
 
             DecideStatus.ASK_USER -> {
+                consecutiveAskUserCount++
+                if (consecutiveAskUserCount > MAX_CONSECUTIVE_ASK_USER) {
+                    overlay.showOrUpdate("답변을 계속 이해하지 못해 중단합니다.")
+                    isSessionActive = false
+                    return
+                }
                 overlay.showOrUpdate("답변 대기: ${response.voice_message}")
-                voice.listenOnce(
-                    onResult = { answer -> collectAndDecide(userSpeech = answer) },
-                    onError = { err -> overlay.showOrUpdate("답변 인식 실패: $err") },
-                )
+                askUserWithRetry(response.voice_message, attempt = 0)
             }
 
             DecideStatus.DONE -> {
+                consecutiveAskUserCount = 0
+                if (response.voice_message.isNotBlank()) {
+                    voice.speak(response.voice_message)
+                }
                 overlay.showOrUpdate("완료: ${response.voice_message}")
                 isSessionActive = false
             }
 
             DecideStatus.UNSUPPORTED -> {
+                consecutiveAskUserCount = 0
+                if (response.voice_message.isNotBlank()) {
+                    voice.speak(response.voice_message)
+                }
                 overlay.showOrUpdate("중단됨: ${response.reason ?: response.voice_message}")
                 isSessionActive = false
             }
         }
+    }
+
+    /**
+     * 질문을 TTS로 읽어준 뒤(끝난 다음에만) 마이크를 켠다 — [VoiceInteractionManager.askAndListen]을 써서
+     * TTS 재생 중에 STT가 그 소리를 주워듣는 경합을 막는다. 인식 실패 시 같은 질문을 최대
+     * [MAX_ASK_RETRIES]번까지 다시 묻는다.
+     */
+    private fun askUserWithRetry(question: String, attempt: Int) {
+        if (attempt >= MAX_ASK_RETRIES) {
+            overlay.showOrUpdate("답변을 인식하지 못했습니다.")
+            isSessionActive = false
+            return
+        }
+        voice.askAndListen(
+            question = question,
+            onAnswer = { answer -> routeAnswer(answer) },
+            onError = { err ->
+                overlay.showOrUpdate("답변 인식 실패($err), 다시 물어봅니다.")
+                askUserWithRetry(question, attempt + 1)
+            },
+        )
+    }
+
+    /** 답변이 정보 제공형이면 goal에 누적, 확인 응답이면 user_speech로 일회성 전달한다 (CLAUDE.md §5-1). */
+    private fun routeAnswer(answer: String) {
+        when (classifyAnswer(answer)) {
+            AnswerType.CONFIRMATION -> collectAndDecide(userSpeech = answer)
+            AnswerType.INFO -> {
+                goal = "$goal. $answer"
+                collectAndDecide(userSpeech = null)
+            }
+        }
+    }
+
+    /**
+     * 짧은 예/아니오류 답변만 확인 응답(CONFIRMATION)으로 분류하고, 나머지는 전부 정보 제공형(INFO)으로
+     * 본다. 클라이언트 측 휴리스틱이라 완벽하지 않음 — 오작동이 관찰되면 백엔드가 질문 종류를
+     * 알려주는 방식(DecideResponse에 필드 추가)으로 전환을 검토할 것.
+     */
+    private fun classifyAnswer(text: String): AnswerType {
+        val normalized = text.trim()
+        return if (normalized in CONFIRMATION_ANSWERS) AnswerType.CONFIRMATION else AnswerType.INFO
     }
 
     private fun performTargetAction(response: DecideResponse) {
@@ -223,5 +281,18 @@ class TestAccessibilityService : AccessibilityService() {
         private const val TARGET_PACKAGE = "com.kakao.talk"
         private const val DEFAULT_GOAL = "카카오톡에서 가장 최근에 찍은 사진 보내줘"
         private const val DEBOUNCE_MS = 500L
+
+        /** STT 인식 실패 시 같은 질문을 다시 묻는 최대 횟수. */
+        private const val MAX_ASK_RETRIES = 3
+
+        /** 세션 하나에서 ASK_USER가 연속으로 나올 수 있는 최대 횟수 — 무한 되묻기 방지. */
+        private const val MAX_CONSECUTIVE_ASK_USER = 5
+
+        private val CONFIRMATION_ANSWERS = setOf(
+            "응", "네", "예", "넵", "웅", "맞아", "맞아요", "그래", "그래요",
+            "좋아", "좋아요", "오케이", "콜", "진행", "진행해줘", "진행해주세요",
+            "아니", "아니요", "아니오", "노", "안돼", "안 돼", "싫어",
+            "취소", "취소해줘", "취소해주세요", "그만", "그만해줘",
+        )
     }
 }
