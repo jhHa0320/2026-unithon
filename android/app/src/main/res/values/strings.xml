@@ -23,4 +23,7 @@
     <string name="main_prompt_after_wake">네, 말씀하세요.</string>
     <string name="main_status_answer_failed">요청을 듣지 못했습니다. 다시 웨이크 문구부터 말씀해주세요.</string>
     <string name="main_status_goal_captured">목표: %1$s</string>
+    <string name="main_status_listening">🎤 듣고 있어요… 말씀해주세요</string>
+    <string name="main_status_processing">인식된 내용을 처리하는 중…</string>
+    <string name="main_status_heard_not_wake">"%1$s"라고 들었어요 (웨이크 문구 "%2$s" 아님, 계속 대기 중)</string>
 </resources>

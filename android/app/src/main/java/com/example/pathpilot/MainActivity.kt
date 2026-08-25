@@ -101,10 +101,21 @@ class MainActivity : AppCompatActivity() {
                         statusText.text = getString(R.string.main_status_answer_failed)
                         restartWakeListening()
                     },
+                    onListeningChanged = { isListening ->
+                        statusText.text = if (isListening) {
+                            getString(R.string.main_status_listening)
+                        } else {
+                            getString(R.string.main_status_processing)
+                        }
+                    },
                 )
             },
             onError = {
                 // 웨이크 문구 인식이 한 번 틀리는 건 흔한 일이라 상태 텍스트를 계속 바꾸지 않고 조용히 재시도한다.
+            },
+            onHeard = { heard ->
+                // 웨이크 문구가 왜 안 걸리는지(STT가 다르게 알아들었는지) 화면에서 바로 보이게 한다.
+                statusText.text = getString(R.string.main_status_heard_not_wake, heard, wakePhrase)
             },
         )
     }

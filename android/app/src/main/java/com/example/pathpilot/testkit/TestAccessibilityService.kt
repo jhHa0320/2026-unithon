@@ -40,6 +40,9 @@ import java.util.UUID
  *   있으면 그걸 쓰고(예: 웨이크업 트리거가 goal을 이미 알고 있는 경우), 없으면 매번 "무엇을
  *   도와드릴까요?"를 TTS로 묻고 STT로 받은 답을 목표로 삼는다 — [startSessionAndCaptureGoal] 참고.
  *   [DEFAULT_GOAL]은 그 STT마저 실패했을 때만 쓰는 최후의 fallback이다.
+ * - 완료 판단(status=DONE)을 서버/LLM에 전적으로 맡긴다 — 화면만 보고 "이미 전송했다"를 스스로
+ *   못 알아채서 같은 절차를 반복 실행할 수 있다(전송류 화면은 전송 전후가 거의 똑같이 생김).
+ *   이 하드 스톱은 아직 없다 — 필요성이 다시 확인되면 재도입 검토.
  */
 class TestAccessibilityService : AccessibilityService() {
 
@@ -324,7 +327,7 @@ class TestAccessibilityService : AccessibilityService() {
         Log.i(
             TAG,
             "액션 실행: id=${response.target_node_id} type=${response.action_type} " +
-                "class=${node.className} text=${node.text} refreshed=$refreshed",
+                "class=${node.className} text=${node.text} desc=${node.contentDescription} refreshed=$refreshed",
         )
         if (!refreshed) {
             Log.w(TAG, "노드 refresh 실패 — 화면이 이미 바뀌어 이 노드는 무효화됐을 가능성 높음")
