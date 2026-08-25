@@ -1,84 +1,49 @@
-import asyncio
-import time
-
-from fastapi import APIRouter, Depends
-
-from backend.config import Settings, get_settings
-from backend.core.logging import get_logger
+from fastapi import APIRouter
 from backend.schemas.request import DecideRequest
-from backend.schemas.response import DecideResponse
-from backend.services.ai_client import AIClient, MockAIClient
-from backend.services.session import session_manager
+from backend.schemas.response import DecideResponse, Decision
 
 router = APIRouter(prefix="/api/v1", tags=["decide"])
-logger = get_logger(__name__)
-
-AI_CLIENT_TIMEOUT_SECONDS = 5.0
-
-
-def get_ai_client() -> AIClient:
-    # TODO: 실제 LLM 클라이언트 구현체로 교체
-    return MockAIClient()
-
 
 @router.post("/decide", response_model=DecideResponse)
-async def decide(
-    request: DecideRequest,
-    settings: Settings = Depends(get_settings),
-    ai_client: AIClient = Depends(get_ai_client),
-) -> DecideResponse:
-    start_time = time.perf_counter()
+async def decide(request: DecideRequest):
+    """
+    안드로이드 팀이 즉시 개발을 시작할 수 있도록 하는 하드코딩된 Mock 서버입니다.
+    실제 개발 시에는 Gemini API 연동 로직으로 교체될 예정입니다.
+    """
 
-    # 1. 요청 수신 및 pydantic 검증
-    #    - elements 빈 배열 체크, bounds 정합성 검증은 schemas/request.py의 validator에서 처리됨 (위반 시 422)
+    # 1. 사용자의 응답(user_speech)이 있는 경우 (결제 승인 단계)
+    if request.user_speech:
+        if any(word in request.user_speech for word in ["응", "어", "그래", "결제해", "좋아"]):
+            return DecideResponse(
+                decision=Decision(
+                    target_node_id="n_mock_pay_btn", # 예시 ID
+                    action_type="CLICK"
+                ),
+                status="DONE",
+                voice_message="결제를 완료했습니다. 예매가 완료되었습니다!",
+                confidence=1.0
+            )
 
-    # 2. 세션 로드 — session_id로 history(최근 3개) 조회. 없으면 빈 history(새 세션)로 취급
-    history = session_manager.get_history(request.session_id)
-
-    # 3. LLM 호출 (5초 타임아웃 — 지연 시 UNSUPPORTED로 정상 응답)
-    try:
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                ai_client.decide,
-                goal=request.goal,
-                app_package=request.app_package,
-                elements=request.elements,
-                history=history,
-            ),
-            timeout=AI_CLIENT_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        response = DecideResponse(
-            target_node_id=None,
-            instruction="AI 응답이 지연되어 이번 단계를 처리할 수 없습니다.",
-            confidence=0.0,
-            status="UNSUPPORTED",
-            reason="AI 응답 지연",
+    # 2. 결제 직전 단계 시뮬레이션 (텍스트에 '결제'가 포함된 경우)
+    is_payment_step = any("결제" in (el.text or "") for el in request.ui_tree)
+    if is_payment_step:
+        return DecideResponse(
+            decision=None,
+            status="WAIT_FOR_CONFIRM",
+            voice_message="서울행 KTX 열차, 총 59,800원입니다. 결제할까요?",
+            confidence=1.0
         )
 
-    # 4. 로깅 — text/content_description은 어떤 경우에도 기록하지 않음
-    latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
-    logger.info(
-        "decide request processed",
-        extra={
-            "session_id": request.session_id,
-            "goal": request.goal,
-            "app_package": request.app_package,
-            "target_node_id": response.target_node_id,
-            "confidence": response.confidence,
-            "status": response.status,
-            "elements_count": len(request.elements),
-            "latency_ms": latency_ms,
-        },
-    )
+    # 3. 일반적인 진행 단계 (첫 번째 클릭 가능한 요소를 클릭하도록 지시)
+    target_node = next((el for el in request.ui_tree if el.clickable), None)
 
-    # 5. 세션 갱신 — 이번 step 결과(target_node_id 포함)를 history에 추가, 최근 3개만 유지
-    selected_text = (
-        f"[node:{response.target_node_id}] {response.instruction}"
-        if response.target_node_id is not None
-        else response.instruction
+    return DecideResponse(
+        decision=Decision(
+            target_node_id=target_node.node_id if target_node else None,
+            action_type="CLICK",
+            input_value=None
+        ),
+        status="CONTINUE",
+        voice_message="다음 단계로 이동할게요.",
+        confidence=0.9
     )
-    session_manager.update_history(request.session_id, selected_text)
-
-    # 6. 응답 반환
-    return response
