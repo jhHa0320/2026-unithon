@@ -34,10 +34,10 @@ import java.util.UUID
  * 이 파일과 `res/xml/test_accessibility_service_config.xml`, Manifest의 관련 `<service>`
  * 블록을 지운다 (docs/ARCHITECTURE.md §2).
  *
- * [TARGET_PACKAGES]에 등록된 앱(카카오톡/카카오택시)만 대상으로 한다 — 목록 밖 앱은 이벤트
- * 자체가 안 들어온다(`res/xml/test_accessibility_service_config.xml`의 packageNames가 OS
+ * [TARGET_PACKAGES]에 등록된 앱(카카오톡/카카오택시/코레일톡)만 대상으로 한다 — 목록 밖 앱은
+ * 이벤트 자체가 안 들어온다(`res/xml/test_accessibility_service_config.xml`의 packageNames가 OS
  * 레벨 필터). 어떤 앱을 켤지는 [com.example.pathpilot.wakeup.WakeAndLaunchActivity]가 goal
- * 문장을 보고 미리 정해서 카카오톡/카카오택시 중 하나를 실행해준다.
+ * 문장을 보고 미리 정해서 지원 앱 중 하나를 실행해준다.
  *
  * 알려진 한계 (테스트 용도라 감수):
  * - [nodeMap]에 담아둔 AccessibilityNodeInfo는 서버 응답이 오는 사이 화면이 바뀌면 무효화될 수
@@ -419,7 +419,7 @@ class TestAccessibilityService : AccessibilityService() {
         /** 이 서비스가 반응하는 앱 목록. `res/xml/test_accessibility_service_config.xml`의
          * packageNames와 반드시 같이 맞춰야 한다 — 저쪽에 없는 패키지를 여기 추가해도 이벤트
          * 자체가 시스템에서 걸러져서 안 들어온다. */
-        private val TARGET_PACKAGES = setOf("com.kakao.talk", "com.kakao.taxi")
+        private val TARGET_PACKAGES = setOf("com.kakao.talk", "com.kakao.taxi", "com.korail.talk")
         private const val DEFAULT_GOAL = "카카오톡에서 가장 최근에 찍은 사진 보내줘"
         private const val DEBOUNCE_MS = 500L
 

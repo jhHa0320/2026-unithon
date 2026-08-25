@@ -14,7 +14,7 @@ import com.example.pathpilot.testkit.TestAccessibilityService
 /**
  * 화면이 꺼져 있거나 잠겨 있는 상태에서 음성 트리거가 들어왔을 때 "화면을 깨우고 목표 앱으로
  * 이동하는 모션"을 담당하는, UI 없는 중계 Activity. onCreate에서 화면을 켜고 goal 문장을 보고
- * 정한 앱(카카오톡/카카오택시, [resolveTargetPackage] 참고)을 실행한 뒤 스스로 finish()한다 —
+ * 정한 앱(카카오톡/카카오택시/코레일톡, [resolveTargetPackage] 참고)을 실행한 뒤 스스로 finish()한다 —
  * 그 이후는 [TestAccessibilityService.onAccessibilityEvent]가 그 앱 창을 감지해서 이어받는다.
  *
  * **잠금 화면 위에 띄우는 것까지만 된다.** 기기가 PIN/패턴/생체인증으로 잠겨 있으면 실제 잠금
@@ -38,14 +38,17 @@ class WakeAndLaunchActivity : Activity() {
 
     /**
      * goal 문장에 어떤 앱을 가리키는 키워드가 있는지 보고 실행할 패키지를 정한다.
-     * **정식 구현이 아니다** — 지금은 "택시"라는 단어가 있으면 카카오택시, 없으면 기본값(카카오톡)인
-     * 아주 단순한 규칙이다. 지원 앱이 늘어나면 이 if/when 사슬 대신 LLM이나 별도 분류기로
-     * 넘기는 걸 검토할 것 — 키워드 매칭은 "택시 사진 보내줘" 같은 애매한 문장에서 오판할 수 있다.
+     * **정식 구현이 아니다** — 단순 키워드 매칭이라 "택시 사진 보내줘", "기차역까지 택시 불러줘"
+     * 같은 문장은 오판할 수 있다. "택시"를 먼저 보는 이유: "기차역까지 택시"처럼 기차 키워드가
+     * 장소로만 쓰인 문장에서 택시가 실제 요청인 경우가 반대 경우보다 흔하기 때문.
+     * 지원 앱이 늘어나면 이 when 사슬 대신 LLM이나 별도 분류기로 넘기는 걸 검토할 것.
      */
     private fun resolveTargetPackage(goal: String?): String {
         val text = goal.orEmpty()
+        val lower = text.lowercase()
         return when {
             text.contains("택시") -> KAKAOTAXI_PACKAGE
+            KORAIL_KEYWORDS.any { lower.contains(it) } -> KORAIL_PACKAGE
             else -> KAKAOTALK_PACKAGE
         }
     }
@@ -99,6 +102,11 @@ class WakeAndLaunchActivity : Activity() {
         private const val TAG = "WakeAndLaunch"
         private const val KAKAOTALK_PACKAGE = "com.kakao.talk"
         private const val KAKAOTAXI_PACKAGE = "com.kakao.taxi"
+        private const val KORAIL_PACKAGE = "com.korail.talk"
+
+        /** 코레일톡을 가리키는 것으로 보는 키워드. STT가 "KTX"를 "케이티엑스"로 받아쓰는 경우가
+         * 있어 둘 다 넣는다. 소문자로 비교하므로 전부 소문자로 적을 것. */
+        private val KORAIL_KEYWORDS = listOf("기차", "열차", "코레일", "ktx", "케이티엑스", "승차권", "무궁화호", "새마을호")
         private const val WAKE_LOCK_TIMEOUT_MS = 10_000L
 
         /** 새로 시작할 세션의 goal을 지정하고 싶을 때 담아 보내는 선택적 extra. */
