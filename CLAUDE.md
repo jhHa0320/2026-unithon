@@ -43,11 +43,10 @@
 
 ## 4-1. 결제·예매 연동 범위 (In-Scope / Out-of-Scope)
 
-이번 해커톤 스코프에서는 실제 결제망에 연결하지 않는다. `docs/planning/`의 관련 섹션과 동일한 경계를 따른다.
+이번 해커톤 스코프에서는 실제 결제망에 연결하지 않는다.
 
-- **In-Scope**: 앱에 등록해 둔 결제수단(Mock)이 예매 앱과 연동되어 결제·예매가 완료되는 것처럼 보이는 UI/UX 데모 플로우. Android 클라이언트 로컬 상태 전환만으로 구현(예: `PaymentMockRepository.completePayment()`가 delay 후 성공 결과를 반환).
+- **In-Scope**: 앱에 등록해 둔 결제수단(Mock)이 예매 앱과 연동되어 결제·예매가 완료되는 것처럼 보이는 UI/UX 데모 플로우. 목적지·시간·좌석 선택부터 결제까지 AI가 중단 없이 자동 진행한다. Android 클라이언트 로컬 상태 전환만으로 구현(예: `PaymentMockRepository.completePayment()`가 delay 후 성공 결과를 반환).
 - **Out-of-Scope**: 실제 PG사 결제 승인/취소 연동, 외부 예매 플랫폼(코레일·SRT 등)과의 Real-time API 결제 확정. backend는 이런 연동을 구현하지 않는다.
-- Mock 결제 완료 화면도 반드시 "결제 대기 확인 → 사용자 확인 탭" 이후에만 진행한다. 안전 원칙 1·2번(자율 클릭 금지, 금융/거래 자동 실행 금지)은 Mock 플로우에도 동일하게 적용되며, Mock 화면은 실제 예매 앱의 결제 화면을 accessibility로 조작해 만들지 않고 우리 앱 자체 오버레이에서만 렌더링한다.
 
 ## 5. API 계약 — `POST /api/v1/decide`
 

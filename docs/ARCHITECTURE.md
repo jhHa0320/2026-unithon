@@ -3,7 +3,7 @@
 이 문서는 팀원(사람)과 각자의 코딩 에이전트가 **동일한 최신 그림**을 보고 작업하도록 만든 단일 기준 문서다. 기획 배경/경쟁분석/BM은 `docs/planning/`을 보고, "지금 코드가 실제로 어떻게 동작하고 무엇을 만들어야 하는가"는 이 문서를 본다.
 
 - 소스 오브 트루스 우선순위: **`CLAUDE.md`(규칙) > 이 문서(구조 설명) > `docs/planning/*.md`(기획 배경)**. 셋이 충돌하면 `CLAUDE.md`가 이긴다. 이 문서는 `CLAUDE.md`를 풀어서 설명하는 문서이지, 새 규칙을 만드는 문서가 아니다.
-- 마지막 갱신 기준 커밋: `33583dc`
+- 마지막 갱신 기준 커밋: `be9f6cb`
 - 스키마/설정값은 실제 소스 코드(`backend/`)를 읽고 정리했다. 코드와 문서가 어긋나면 코드가 맞다 — 이 문서를 갱신해달라.
 
 ---
@@ -17,9 +17,8 @@ flowchart LR
         AS["AccessibilityService\n(대상 앱 UI Tree 읽기)"]
         CB["Context Builder\n(UI Tree → DecideRequest JSON)"]
         NET["Network Client\n(Retrofit → POST /api/v1/decide)"]
-        ACT["Auto Action\n(performAction ACTION_CLICK / setText)"]
-        GATE["Payment Gate 화면\n(자체 오버레이, 사용자 확인 대기)"]
-        MOCK["Mock 결제 연동·완료 화면\n(PaymentMockRepository)"]
+        ACT["Auto Action\n(performAction ACTION_CLICK / setText, 결제 단계 포함)"]
+        MOCK["Mock 결제 연동·완료 화면\n(PaymentMockRepository, 자동 트리거)"]
         TARGET["대상 앱\n(코레일+)"]
     end
 
@@ -44,11 +43,10 @@ flowchart LR
     NET --> ACT
     ACT -->|"클릭/입력 실행"| TARGET
     TARGET -->|"화면 변경 이벤트"| AS
-    ACT -.->|"결제/송금 라벨 감지 시"| GATE
-    GATE -->|"사용자 확인 탭"| MOCK
+    ACT -.->|"결제 단계 도달 시"| MOCK
 ```
 
-**핵심 한 줄**: Wake Word가 화면 Off 상태에서 발화를 인식하면, AccessibilityService가 대상 앱(코레일+) 화면을 읽어 백엔드에 보내고, 백엔드는 LLM에게 "다음에 클릭/입력할 요소 하나"만 판단시켜 돌려준다. Android는 그 판단을 그대로 실행(자동 클릭)하되, **결제·송금 계열 요소는 백엔드가 LLM 판단과 무관하게 항상 차단**하고 사용자 확인 화면으로 전환한다. 결제 자체는 실제 PG 연동 없이 앱 내부 Mock으로만 완료된다.
+**핵심 한 줄**: Wake Word가 화면 Off 상태에서 발화를 인식하면, AccessibilityService가 대상 앱(코레일+) 화면을 읽어 백엔드에 보내고, 백엔드는 LLM에게 "다음에 클릭/입력할 요소 하나"만 판단시켜 돌려준다. Android는 그 판단을 목적지·시간·좌석 선택부터 결제까지 **중단 없이 그대로 실행(자동 클릭)한다**. 결제 자체는 실제 PG 연동 없이 앱 내부 Mock으로만 완료된다.
 
 ---
 
@@ -73,11 +71,9 @@ flowchart LR
 3. **UI 읽기**: `AccessibilityService.onAccessibilityEvent` → `rootInActiveWindow`를 재귀 탐색해 클릭 가능/의미 있는 노드만 추려 `text`, `content_description`, `class_name`, `clickable`, `bounds`를 수집하고 세션 내 임시 `id`를 부여한다.
 4. **요청 전송**: Context Builder가 이를 `DecideRequest`(§6)로 직렬화해 `POST /api/v1/decide` 호출.
 5. **백엔드 처리** (§5 상세): 세션 history 로드 → LLM 호출(5초 타임아웃) → 로깅 → 세션 갱신 → `DecideResponse` 반환.
-6. **실행**: 응답 `status`가 `CONTINUE`면 Android가 `target_node_id`에 해당하는 노드에 즉시 `performAction(ACTION_CLICK)` 또는 `setText`를 실행한다 — **AI가 직접 클릭한다** (사람이 누르지 않음).
-7. **반복**: 화면이 바뀌면(`TYPE_WINDOW_STATE_CHANGED`/`TYPE_WINDOW_CONTENT_CHANGED`, 디바운스 적용) 3~6단계를 반복 — 출발역 → 도착역 → 날짜 → 조회 → 열차 선택 → 좌석 선택까지 자동 진행.
-8. **결제 게이트**: 다음 대상 요소의 라벨이 결제/송금/삭제/인증 계열 키워드와 매치되면, **LLM 응답과 무관하게** 백엔드가 강제로 게이트 상태로 override하고 Android는 자동 클릭을 멈춘 뒤 자체 오버레이로 "총 OO원, 결제를 진행할까요?" 확인 화면을 띄운다.
-9. **사용자 확인**: 사용자가 직접 확인 탭을 눌러야만 다음으로 진행된다. AI는 이 버튼을 대신 누르지 않는다 (`CLAUDE.md` 안전 원칙 §4-1).
-10. **Mock 결제 완료**: 확인 후에는 실제 PG/코레일 API를 호출하지 않고, `PaymentMockRepository.completePayment()` 같은 로컬 코루틴이 1~2초 delay 후 더미 카드번호(`**** **** **** 1234`)와 "예매가 완료되었습니다" 화면을 보여준다. 화면에는 반드시 "Demo/테스트" 표기를 남긴다.
+6. **실행**: 응답 `status`가 `CONTINUE`면 Android가 `target_node_id`에 해당하는 노드에 즉시 `performAction(ACTION_CLICK)` 또는 `setText`를 실행한다 — **AI가 직접 클릭한다.**
+7. **반복**: 화면이 바뀌면(`TYPE_WINDOW_STATE_CHANGED`/`TYPE_WINDOW_CONTENT_CHANGED`, 디바운스 적용) 3~6단계를 반복 — 출발역 → 도착역 → 날짜 → 조회 → 열차 선택 → 좌석 선택 → 결제까지 **중단 없이** 자동 진행.
+8. **Mock 결제 완료**: 결제 단계에 도달하면 실제 PG/코레일 API를 호출하지 않고, `PaymentMockRepository.completePayment()` 같은 로컬 코루틴이 1~2초 delay 후 더미 카드번호(`**** **** **** 1234`)와 "예매가 완료되었습니다" 화면을 자동으로 보여준다. 화면에는 반드시 "Demo/테스트" 표기를 남긴다.
 
 ---
 
@@ -93,8 +89,8 @@ flowchart LR
 | 3 | AI 없이 문자열 매칭 → `performAction(ACTION_CLICK)` 자동 클릭 검증 | 지정 문자열 버튼이 실제로 눌림 |
 | 4 | 클릭 가능/의미있는 노드만 추려 session-local id 부여 → `goal + elements` JSON을 백엔드로 전송, 응답 수신 | 백엔드 응답으로 `target_node_id` 수신 확인 |
 | 5 | 화면 변경 이벤트(디바운스) 감지 시 3~4 반복하는 루프 | 여러 단계 연속 자동 진행 |
-| 6 | 결제/송금 라벨 감지 시 게이트 화면 전환, 자동 실행 중단 | 결제 버튼 앞에서 반드시 멈춤 |
-| 6-1 | Mock 결제수단 연동·완료 화면 (로컬 상태 전환만, 실 API 호출 없음) | "결제 완료" 더미 화면 표시 |
+| 6 | 결제 단계까지 자동 클릭 계속 진행 (중단 없음) | 결제 단계까지 도달 |
+| 6-1 | Mock 결제수단 연동·완료 화면 자동 전환 (로컬 상태 전환만, 실 API 호출 없음) | "결제 완료" 더미 화면 표시 |
 | 7 | (필요시) 좌석맵 등 텍스트 노드 없는 UI에 대해 Screenshot + Vision fallback | 접근성 라벨 없는 UI에서도 진행 가능 |
 
 **필수 AndroidManifest 권한/선언 (현재 전부 없음)**: `INTERNET`, `BIND_ACCESSIBILITY_SERVICE`를 갖는 `<service>`, (Wake Word 상시 감지용) `FOREGROUND_SERVICE`, 오버레이용 `SYSTEM_ALERT_WINDOW`.
@@ -155,7 +151,7 @@ class DecideResponse(BaseModel):
     reason: str | None = None
 ```
 
-> ⚠️ **`docs/planning/01`, `05`는 `status`에 `PAYMENT_GATE`가 있다고 가정하고, `action`(click/setText)·`value`(setText용 입력값) 필드도 요구한다. 현재 스키마에는 이 셋이 전부 없다.** 자동클릭+결제게이트 시나리오로 가려면 이 스키마 확장이 선행되어야 한다 — §9 참고.
+> ⚠️ **`docs/planning/01`, `05`는 `status`에 `PAYMENT_GATE`가 있다고 가정하고, `action`(click/setText)·`value`(setText용 입력값) 필드도 요구한다.** `PAYMENT_GATE`는 결제 전 사용자 확인을 전제로 한 이전 설계이며 현재는 폐기됐다(§7 참고) — 다시 넣지 말 것. 다만 `action`/`value` 필드는 자동 클릭·자동 입력에 여전히 필요하며 현재 스키마에는 없다 — §9 참고.
 
 **설정값** (`backend/config.py`, 하드코딩 금지 — 여기서만 관리):
 
@@ -169,13 +165,12 @@ SENSITIVE_KEYWORDS: list[str] = ["송금","이체","결제","계좌","비밀번�
 
 ## 7. 안전 설계 (`CLAUDE.md` §4 — 절대 준수)
 
-1. 금융/거래 자동 실행 금지: 송금·결제·인증·계정삭제 관련 요소는 LLM에 넘기기 전 백엔드가 차단
-2. 화면 데이터 비영속화: UI Tree는 요청 처리 중에만 메모리에 존재, 추론 직후 폐기, DB/파일 저장 금지
-3. 보안 통제 우회 금지: Google Play 접근성 API 정책 준수 범위 내에서만 동작
-4. 신뢰도 게이트: LLM confidence가 임계값(`0.6`) 미만이면 `status=ASK_USER`로 강제 override
-5. 민감정보 마스킹: 비밀번호/주민번호/계좌번호 등은 LLM 전송 전 서버단에서 마스킹
+1. 화면 데이터 비영속화: UI Tree는 요청 처리 중에만 메모리에 존재, 추론 직후 폐기, DB/파일 저장 금지
+2. 보안 통제 우회 금지: Google Play 접근성 API 정책 준수 범위 내에서만 동작
+3. 신뢰도 게이트: LLM confidence가 임계값(`0.6`) 미만이면 `status=ASK_USER`로 강제 override
+4. 민감정보 마스킹: 비밀번호/주민번호/계좌번호 등은 LLM 전송 전 서버단에서 마스킹
 
-**결제 실행은 항상 사람이 한다** — AI는 목적지~좌석까지만 자동 실행하고, 결제 대기 화면에서 사용자가 직접 확인 탭을 눌러야 다음으로 진행된다. 이 원칙은 Mock 결제 단계에도 동일하게 적용된다 (`CLAUDE.md` §4-1).
+**결제 실행도 자동화 대상이다** — 목적지~좌석 선택뿐 아니라 결제까지 AI가 중단 없이 자동 진행한다(`CLAUDE.md` §4-1). 결제 대기 확인 화면·사용자 확인 탭·자체 오버레이를 통한 결제 게이트는 더 이상 두지 않는다. 다만 실제 PG/코레일 결제 확정 API 연동은 여전히 스코프 밖이며, 결제는 Android 로컬 `PaymentMockRepository` Mock으로만 완료된다.
 
 ---
 
@@ -189,11 +184,12 @@ SENSITIVE_KEYWORDS: list[str] = ["송금","이체","결제","계좌","비밀번�
 
 | 갭 | 영향 | 담당 |
 |---|---|---|
-| `backend/services/safety.py` 삭제됨 — 위험요소 필터링/마스킹/confidence 게이트가 파이프라인에 없음 (`CLAUDE.md` §4 위반 상태) | 안전 원칙 미충족. 재구현 방식(백엔드 규칙 vs 프롬프트 내 규칙) 결정 필요 | 백엔드 |
-| `DecideResponse.status`에 `PAYMENT_GATE` 없음, `action`/`value` 필드 없음 | 자동클릭+결제게이트 시나리오를 구현하려면 스키마 확장 필수 | 백엔드 (스키마 변경 시 Android·AI 담당자에게 공지) |
+| `backend/services/safety.py` 삭제됨 — 민감정보 마스킹/confidence 게이트가 파이프라인에 없음 (`CLAUDE.md` §4 위반 상태) | 안전 원칙 미충족. 재구현 방식(백엔드 규칙 vs 프롬프트 내 규칙) 결정 필요 | 백엔드 |
+| `DecideResponse`에 `action`(click/setText)·`value`(setText 입력값) 필드 없음 | 자동 클릭뿐 아니라 텍스트 입력(출발역/도착역 등)까지 자동화하려면 스키마 확장 필요 | 백엔드 (스키마 변경 시 Android·AI 담당자에게 공지) |
 | `backend/services/ai_client.py`가 `MockAIClient` 고정 (`target_node_id=1, confidence=0.99, CONTINUE` 하드코딩) | 실제 LLM 미연동. Anthropic API 연동 필요 | AI/LLM |
-| `android/`가 기본 템플릿 상태 — AccessibilityService·오버레이·네트워킹·Wake Word 전부 미구현 | §4 Phase 0~7 처음부터 구현 | Android |
+| `android/`가 기본 템플릿 상태 — AccessibilityService·자동클릭·네트워킹·Wake Word 전부 미구현 | §4 Phase 0~7 처음부터 구현 | Android |
 | `request.history`가 요청에는 있지만 서버가 무시하고 자체 세션 history로 덮어씀 | 의도된 동작인지 재확인 | 백엔드 |
+| `docs/planning/01`, `05`가 여전히 결제 게이트(사용자 확인 탭, `PAYMENT_GATE` 상태, 자체 오버레이)를 전제로 서술됨 | 완전 자동결제 방향(`CLAUDE.md` §4-1, 이 문서 §7)과 어긋남. `docs/planning` 갱신 필요 | 기획/전체 |
 
 ---
 
