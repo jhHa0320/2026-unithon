@@ -43,6 +43,16 @@ class StatusOverlayManager(context: Context) {
 
     private val hideHandler = Handler(Looper.getMainLooper())
 
+    /**
+     * 오버레이 억제 상태. true인 동안은 [showOrUpdate]/[showAnalyzing]가 화면을 그리지 않는다.
+     *
+     * 단순 [hide]와 다른 점: 약관 동의처럼 **자동화는 계속 도는** 화면에서는 진행 멘트마다
+     * showOrUpdate가 계속 불리는데, hide만 해두면 다음 멘트가 오버레이를 곧장 되살려서
+     * 체크박스를 도로 가린다. 억제 중에는 갱신 요청 자체를 삼켰다가, [unsuppress] 후
+     * 첫 갱신부터 다시 그린다.
+     */
+    private var isSuppressed = false
+
     /** "중단하기" 버튼을 눌렀을 때 실행할 동작. 서비스 쪽에서 세션 중단+새 요청 청취를 걸어준다. */
     var onStopClicked: (() -> Unit)? = null
 
@@ -65,6 +75,7 @@ class StatusOverlayManager(context: Context) {
      * 일일이 기억할 필요가 없게.
      */
     fun showOrUpdate(message: String, expression: CharacterExpression? = null) {
+        if (isSuppressed) return
         ensureViews()
         hideHandler.removeCallbacksAndMessages(null)
         spinnerView?.visibility = View.GONE
@@ -75,8 +86,21 @@ class StatusOverlayManager(context: Context) {
         expression?.let { characterView?.setImageResource(it.drawableRes) }
     }
 
+    /** 화면을 가리면 안 되는 구간(비밀번호·약관 등) 동안 오버레이를 걷고 갱신도 막는다. */
+    fun suppress() {
+        isSuppressed = true
+        hide()
+    }
+
+    /** 억제를 푼다. 화면은 다음 [showOrUpdate]가 그린다 — 여기서 바로 그리지 않는 이유는
+     * 무슨 문구/표정으로 복귀할지는 호출부(자동화 흐름)가 정하기 때문이다. */
+    fun unsuppress() {
+        isSuppressed = false
+    }
+
     /** 문구 대신 스피너를 보여준다 — "실시간으로 분석 중"이라는 걸 아이콘으로만 알린다. */
     fun showAnalyzing() {
+        if (isSuppressed) return
         ensureViews()
         hideHandler.removeCallbacksAndMessages(null)
         messageView?.visibility = View.GONE
@@ -175,6 +199,42 @@ class StatusOverlayManager(context: Context) {
         val resId = hostContext.resources.getIdentifier("navigation_bar_height", "dimen", "android")
         if (resId > 0) return hostContext.resources.getDimensionPixelSize(resId)
         return (FALLBACK_NAV_CLEARANCE_DP * hostContext.resources.displayMetrics.density).toInt()
+    }
+
+    /**
+     * 지금 화면에 붙어 있는 오버레이의 화면 좌표 영역. 안 떠 있으면 null.
+     *
+     * 접근성 스캔이 쓴다: 오버레이도 하나의 '창'이라, 오버레이가 덮은 영역의 대상 앱 노드는
+     * `isVisibleToUser=false`가 되어 스캔에서 빠진다 — 코레일 안내창의 확인 버튼처럼 화면
+     * 하단 중앙에 뜨는 버튼이 LLM에 아예 안 보이는 원인. 스캔 쪽에서 "우리 오버레이가 가린
+     * 것"은 예외로 포함시키기 위해 이 영역을 알려준다.
+     */
+    fun visibleBounds(): android.graphics.Rect? {
+        val view = rootView ?: return null
+        if (!view.isAttachedToWindow || view.width == 0) return null
+        val origin = IntArray(2)
+        view.getLocationOnScreen(origin)
+        return android.graphics.Rect(
+            origin[0],
+            origin[1],
+            origin[0] + view.width,
+            origin[1] + view.height,
+        )
+    }
+
+    /**
+     * 오버레이의 터치 수신 여부를 바꾼다. false면 모든 터치가 뒤 앱으로 통과한다.
+     * 좌표 탭 폴백이 오버레이 위 좌표를 눌러야 할 때, 탭하는 순간만 통과시키는 용도.
+     */
+    fun setTouchable(touchable: Boolean) {
+        val view = rootView ?: return
+        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        val flag = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        val newFlags = if (touchable) params.flags and flag.inv() else params.flags or flag
+        if (newFlags == params.flags) return
+        params.flags = newFlags
+        runCatching { windowManager.updateViewLayout(view, params) }
+            .onFailure { Log.w(TAG, "오버레이 터치 설정 변경 실패", it) }
     }
 
     fun hide() {

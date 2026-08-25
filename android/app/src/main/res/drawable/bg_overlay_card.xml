@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 오버레이 말풍선 카드 전용 배경. 앱 화면의 카드(bg_card_cream)와 달리 **반투명**이다 —
+     오버레이가 대상 앱 위에 뜨므로, 뒤에 어떤 버튼이 있는지 사용자가 비쳐 보여야 한다. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#C9FEF9F4" />
+    <corners android:radius="28dp" />
+</shape>

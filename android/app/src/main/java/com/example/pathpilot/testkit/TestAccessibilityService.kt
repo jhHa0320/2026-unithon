@@ -123,17 +123,52 @@ class TestAccessibilityService : AccessibilityService() {
     private var isPrescrolling = false
     private var pendingPrescrollStep: Runnable? = null
 
+    /** 방금 실행한 액션의 대상 시그니처. 다음 스캔에서 화면이 그대로면 "그 액션은 무효였다"로
+     * 기록하는 데 쓴다. */
+    private var pendingActionKey: String? = null
+
+    /** 무효로 판명된 클릭 대상. performAction이 true를 돌려주고도 화면을 못 바꾼 노드다 —
+     * 같은 대상을 또 고르면 performAction 대신 곧장 좌표 탭(진짜 터치)으로 간다. */
+    private var ineffectiveActionKey: String? = null
+
+    /** 직전에 말한 진행 멘트와 반복 횟수. 같은 화면을 재탐색(프리스크롤 등)하는 동안 서버가
+     * 같은 voice_message를 또 보내면, 그대로 반복하는 대신 "잠시만 기다려 주세요" 계열의
+     * 대기 문구로 바꿔 말한다 — 같은 멘트가 두 번 나오면 사용자는 앱이 이상하다고 느낀다. */
+    private var lastProgressMessage: String? = null
+    private var progressRepeatCount = 0
+
+    /**
+     * 다음 스캔에서 프리스크롤을 건너뛸지. 직전 응답이 CONTINUE("~할게요" 식 행동 선언)였으면
+     * LLM이 이미 무엇을 할지 알고 있으므로 화면 전체 훑기가 불필요하다 — 코레일처럼 목록이
+     * 긴 화면에서 매 스텝 스크롤 왕복을 하면 진행이 한없이 늘어진다. 되묻기 답변 후,
+     * 진행 정체(워치독), 실패 복구, 새 세션처럼 "다시 파악이 필요한 시점"에만 훑는다.
+     */
+    private var skipNextPrescroll = false
+
     /** 마지막으로 프리스크롤을 수행한 화면의 지문. 같은 화면에서 스캔이 반복될 때
      * (워치독 재시도 등) 스크롤 왕복을 다시 하지 않기 위한 기억이다 — 이게 없으면
      * "복귀 스크롤 -> 이벤트 -> 재스캔 -> 다시 프리스크롤"의 무한 왕복이 생긴다. */
     private var lastPrescrolledFingerprint: Int? = null
 
+    /** 화면 민감도. 어떤 화면에서 무엇을 멈출지 결정한다. */
+    private enum class ScreenSensitivity {
+        /** 일반 화면 — 오버레이·자동화 모두 정상. */
+        NONE,
+
+        /** 약관 동의 등: 오버레이만 걷는다(체크박스를 가리지 않게). **자동화는 계속** —
+         * 체크박스는 AI가 눌러야 할 대상이다. */
+        OVERLAY_ONLY,
+
+        /** 결제 비밀번호·생체인증: 오버레이를 걷고 자동 조작도 멈춘다.
+         * 비밀번호는 AI가 대신 누를 대상이 아니다. */
+        FULL_PAUSE,
+    }
+
     /**
-     * 민감 입력 화면(결제 비밀번호·생체인증) 때문에 오버레이를 잠시 걷어둔 상태인지.
-     * 이런 화면에서는 하단 카드가 비밀번호 키패드를 가려 사용자가 입력을 못 한다.
-     * 다음 화면으로 넘어가면(민감 요소가 사라지면) 오버레이를 되살린다.
+     * 민감 화면 때문에 오버레이를 걷어둔 상태인지(모드 포함). 다음 화면으로 넘어가
+     * 민감 요소가 사라지면 오버레이를 되살린다.
      */
-    private var isOverlaySuppressed = false
+    private var suppressedMode = ScreenSensitivity.NONE
 
     /** 세션 세대 번호. 중단/새 세션마다 올라가고, 서버 응답이 도착했을 때 이 값이 요청 시점과
      * 다르면(= 그 사이 사용자가 중단했거나 세션이 바뀌었으면) 응답을 버린다 — 중단을 눌렀는데
@@ -270,7 +305,13 @@ class TestAccessibilityService : AccessibilityService() {
         pendingPrescrollStep?.let { debounceHandler.removeCallbacks(it) }
         pendingPrescrollStep = null
         lastPrescrolledFingerprint = null
-        isOverlaySuppressed = false
+        skipNextPrescroll = false
+        lastProgressMessage = null
+        progressRepeatCount = 0
+        pendingActionKey = null
+        ineffectiveActionKey = null
+        suppressedMode = ScreenSensitivity.NONE
+        overlay.unsuppress()
         settleUntil = 0L
         // 세션이 바뀌면 직전 화면과의 비교는 의미가 없다. 남겨두면 새 세션의 첫 스캔이
         // "직전과 같은 화면"으로 오인돼 통째로 건너뛰어진다.
@@ -330,7 +371,10 @@ class TestAccessibilityService : AccessibilityService() {
             },
             onError = {
                 if (isStaleEpoch(epoch)) return@askAndListen
-                listenForNewRequest(attempt + 1)
+                // 재질문 전 한 박자 쉰다 — 즉시 재오픈하면 인식 실패가 연쇄된다.
+                debounceHandler.postDelayed({
+                    if (!isStaleEpoch(epoch)) listenForNewRequest(attempt + 1)
+                }, RETRY_ASK_DELAY_MS)
             },
         )
     }
@@ -353,8 +397,11 @@ class TestAccessibilityService : AccessibilityService() {
      * (웨이크 흐름과 동일한 진입점).
      */
     private fun startRequestedGoal(answer: String) {
-        overlay.showOrUpdate("요청: $answer", CharacterExpression.FOCUSED)
-        val target = WakeAndLaunchActivity.resolveTargetPackage(answer)
+        overlay.showOrUpdate("사용자: $answer", CharacterExpression.FOCUSED)
+        // 새 요청에 앱 키워드가 없으면 **지금 쓰던 앱**을 그대로 쓴다. 예전엔 기본값이
+        // 카카오톡이라, 코레일 진행 중 중단하고 "처음부터 다시 해줘"라고만 말해도
+        // 카카오톡으로 화면이 튀어버렸다.
+        val target = WakeAndLaunchActivity.resolveTargetPackage(answer, defaultPackage = currentPackage)
         pendingGoal = answer
         if (target == currentPackage) {
             beginNewSession()
@@ -368,7 +415,9 @@ class TestAccessibilityService : AccessibilityService() {
             return
         }
         sessionRequested = true
-        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        // CLEAR_TASK: 대상 앱이 백그라운드에 중간 화면(채팅방 등)으로 남아 있어도
+        // 메인 화면부터 새로 시작한다 — 자동화가 항상 같은 출발점에서 시작하게.
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         startActivity(launchIntent)
     }
 
@@ -385,13 +434,13 @@ class TestAccessibilityService : AccessibilityService() {
     private fun exitApp() {
         stopSessionCore()
         Log.i(TAG, "사용자 요청으로 세션 종료 (서비스는 유지, 다음 웨이크 트리거 대기)")
-        voice.speak("종료할게요.") {
-            // endSession()은 오버레이를 문구만 바꿔 계속 띄워두므로("완료 후에도 버튼이 남아있게"가
-            // 목적) 여기서 쓰면 버튼이 안 사라진다. "종료하기"는 눈에 보이는 화면 자체를 없애는
-            // 것까지가 사용자 기대이므로 overlay.hide()로 완전히 제거한다. 서비스/접근성 이벤트
-            // 수신은 계속되므로 다음 웨이크 트리거가 오면 showOrUpdate가 오버레이를 다시 만든다.
-            overlay.hide()
-        }
+        // 오버레이는 **즉시** 걷는다. 예전엔 "종료할게요" TTS가 끝난 뒤에 hide()를 불러서
+        // 버튼을 눌러도 1초 넘게 화면이 남아 있었다 — 사용자에겐 "안 눌린 것"처럼 보인다.
+        // endSession()을 쓰지 않는 이유: 그쪽은 문구만 바꾸고 오버레이(버튼 포함)를 계속
+        // 띄워두는 경로다. "종료하기"는 화면 자체를 없애는 것까지가 기대다. 서비스/접근성
+        // 이벤트 수신은 계속되므로 다음 웨이크 트리거가 오면 오버레이가 다시 만들어진다.
+        overlay.hide()
+        voice.speak("종료할게요.")
     }
 
     /** 세션을 조용히 끝낸다(완료/실패 안내 후). 오버레이는 버튼과 함께 계속 떠 있는다 —
@@ -402,6 +451,10 @@ class TestAccessibilityService : AccessibilityService() {
     ) {
         isSessionActive = false
         disarmWatchdog()
+        // 민감 화면(약관 등)에서 억제된 채 세션이 끝나는 경우: 억제를 풀지 않으면
+        // 아래 showOrUpdate가 삼켜져 종료 안내가 영영 안 보인다.
+        suppressedMode = ScreenSensitivity.NONE
+        overlay.unsuppress()
         overlay.showOrUpdate(message, expression)
     }
 
@@ -441,6 +494,11 @@ class TestAccessibilityService : AccessibilityService() {
             return
         }
         Log.i(TAG, "워치독: 진행 없음 — 재스캔 (retry=$watchdogRetries)")
+        skipNextPrescroll = false // 진행이 막혔다 — 화면을 다시 제대로 파악한다
+        // 지문 스킵을 우회한다. 재시도의 목적이 "LLM에게 다시 물어 다른 방법을 시도"인데,
+        // 화면이 그대로라는 이유로 서버 호출을 생략하면 재시도가 아무 일도 못 하고
+        // 한도만 소진된다(실측: 스킵 3연속 -> "진행이 멈췄습니다").
+        lastScreenFingerprint = null
         collectAndDecide(userSpeech = null)
     }
 
@@ -456,7 +514,7 @@ class TestAccessibilityService : AccessibilityService() {
         pendingGoal = null
         if (preset != null) {
             goal = preset
-            overlay.showOrUpdate("테스트 시작: $goal", CharacterExpression.FOCUSED)
+            overlay.showOrUpdate("사용자: $goal", CharacterExpression.FOCUSED)
             scheduleCollectAndDecide()
             return
         }
@@ -591,26 +649,44 @@ class TestAccessibilityService : AccessibilityService() {
 
         val candidates = collectCandidates(root)
 
-        // 결제 비밀번호·생체인증처럼 **사용자가 직접 입력해야 하는 화면**에서는 오버레이를
-        // 잠시 걷는다 — 하단 카드가 키패드를 가리면 입력 자체가 불가능하다. 같은 이유로 이
-        // 화면에서는 서버 호출(자동 조작)도 하지 않는다: 비밀번호는 AI가 대신 누를 대상이
-        // 아니다. 화면이 넘어가 민감 요소가 사라지면 오버레이를 되살리고 자동화를 재개한다.
-        if (isSensitiveInputScreen(candidates)) {
-            if (!isOverlaySuppressed) {
-                isOverlaySuppressed = true
-                disarmWatchdog() // 입력을 기다리는 시간은 '정지'가 아니다 — 재스캔 재촉 금지
-                overlay.hide()
-                voice.speak("이 화면에서는 직접 입력해 주세요. 끝나면 이어서 도와드릴게요.")
-                Log.i(TAG, "민감 입력 화면 감지 — 오버레이 숨김, 자동 조작 일시 중지")
+        // 화면 민감도에 따라 오버레이/자동화를 조절한다.
+        // - FULL_PAUSE(비밀번호·생체): 오버레이를 걷고 자동 조작도 멈춘다 — 사용자가 직접 입력.
+        // - OVERLAY_ONLY(약관 동의): 오버레이만 걷는다(체크박스를 가리지 않게).
+        when (classifyScreenSensitivity(candidates)) {
+            ScreenSensitivity.FULL_PAUSE -> {
+                if (suppressedMode != ScreenSensitivity.FULL_PAUSE) {
+                    suppressedMode = ScreenSensitivity.FULL_PAUSE
+                    disarmWatchdog() // 입력을 기다리는 시간은 '정지'가 아니다 — 재스캔 재촉 금지
+                    overlay.suppress()
+                    voice.speak("이 화면은 직접 확인해 주세요. 끝나면 이어서 도와드릴게요.")
+                    Log.i(TAG, "비밀번호/생체 화면 감지 — 오버레이 숨김, 자동 조작 일시 중지")
+                }
+                return
             }
-            return
-        }
-        if (isOverlaySuppressed) {
-            isOverlaySuppressed = false
-            // 직전 화면과 같다는 이유로 재개 판단이 건너뛰어지지 않게 지문을 지운다.
-            lastScreenFingerprint = null
-            overlay.showOrUpdate("이어서 도와드릴게요.", CharacterExpression.FOCUSED)
-            Log.i(TAG, "민감 입력 화면 벗어남 — 오버레이 복원, 자동화 재개")
+
+            ScreenSensitivity.OVERLAY_ONLY -> {
+                if (suppressedMode != ScreenSensitivity.OVERLAY_ONLY) {
+                    suppressedMode = ScreenSensitivity.OVERLAY_ONLY
+                    overlay.suppress()
+                    Log.i(TAG, "약관 화면 감지 — 오버레이만 숨김, 자동화는 계속")
+                }
+                // 계속 진행 — 아래 프리스크롤/판단 파이프라인을 그대로 탄다. 체크박스는
+                // AI가 눌러야 할 대상이므로 자동 조작을 멈추면 안 된다.
+            }
+
+            ScreenSensitivity.NONE -> {
+                if (suppressedMode != ScreenSensitivity.NONE) {
+                    val wasFullPause = suppressedMode == ScreenSensitivity.FULL_PAUSE
+                    suppressedMode = ScreenSensitivity.NONE
+                    overlay.unsuppress()
+                    // 직전 화면과 같다는 이유로 재개 판단이 건너뛰어지지 않게 지문을 지운다.
+                    lastScreenFingerprint = null
+                    if (wasFullPause) {
+                        overlay.showOrUpdate("이어서 도와드릴게요.", CharacterExpression.FOCUSED)
+                    }
+                    Log.i(TAG, "민감 화면 벗어남 — 오버레이 복원")
+                }
+            }
         }
 
         // 판단하기 전에 화면을 아래까지 훑는다: 스크롤 가능한 목록이 있고 이 화면에서 아직
@@ -619,7 +695,9 @@ class TestAccessibilityService : AccessibilityService() {
         val prescrollKey = prescrollFingerprintOf(candidates)
         val scrollContainer = candidates.filter { it.scrollable }
             .maxByOrNull { it.bounds.width().toLong() * it.bounds.height() }
-        if (scrollContainer != null && prescrollKey != lastPrescrolledFingerprint && !isPrescrolling) {
+        if (scrollContainer != null && !skipNextPrescroll &&
+            prescrollKey != lastPrescrolledFingerprint && !isPrescrolling
+        ) {
             lastPrescrolledFingerprint = prescrollKey
             startPrescroll(scrollContainer.node, candidates, userSpeech)
             return
@@ -631,6 +709,11 @@ class TestAccessibilityService : AccessibilityService() {
     /** 화면 전체를 훑어 후보를 모은다. 프리스크롤 중간 단계에서도 재사용한다. */
     private fun collectCandidates(root: AccessibilityNodeInfo): List<Candidate> {
         val screen = Rect(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
+        // 우리 오버레이가 지금 덮고 있는 화면 영역. 오버레이도 하나의 '창'이라 이 영역의
+        // 대상 앱 노드는 isVisibleToUser=false로 보고된다 — 코레일 안내창의 확인 버튼처럼
+        // 하단 중앙에 뜨는 요소가 스캔에서 통째로 빠지는 원인. 이 영역과 겹치는 노드는
+        // "우리가 가린 것"이므로 보이는 것으로 취급한다(ACTION_CLICK은 가림과 무관하게 동작).
+        val overlayArea = overlay.visibleBounds()
         val candidates = mutableListOf<Candidate>()
 
         fun visit(node: AccessibilityNodeInfo) {
@@ -642,7 +725,9 @@ class TestAccessibilityService : AccessibilityService() {
             if (node.isClickable || node.isScrollable || !text.isNullOrBlank() || !description.isNullOrBlank()) {
                 val bounds = Rect()
                 node.getBoundsInScreen(bounds)
-                if (isUsableBounds(bounds, screen) && node.isVisibleToUser) {
+                val visibleOrCoveredByUs = node.isVisibleToUser ||
+                    (overlayArea != null && Rect.intersects(overlayArea, bounds))
+                if (isUsableBounds(bounds, screen) && visibleOrCoveredByUs) {
                     candidates.add(
                         Candidate(
                             node = node,
@@ -791,11 +876,20 @@ class TestAccessibilityService : AccessibilityService() {
         val fingerprint = fingerprintOf(elements)
         if (userSpeech == null && fingerprint == lastScreenFingerprint) {
             Log.i(TAG, "화면이 직전과 동일 — 서버 호출 생략 (fingerprint=$fingerprint)")
+            // 직전에 실행한 액션이 화면을 못 바꿨다는 뜻이다. 그 대상을 무효로 기록해 두면,
+            // 다음 판단이 같은 대상을 또 고를 때 performAction 대신 좌표 탭으로 간다 —
+            // performAction이 true를 돌려주고도 실제로는 안 눌리는 노드가 있다(코레일 실측).
+            pendingActionKey?.let {
+                ineffectiveActionKey = it
+                Log.w(TAG, "직전 액션 무효 판정 — 다음 동일 대상은 좌표 탭으로 강제 (key=$it)")
+            }
+            pendingActionKey = null
             // 진짜로 아무 진행이 없는 상황일 수 있으니 워치독에 맡긴다. 계속 같으면
             // 재시도 한도에 걸려 사용자에게 알리고 끝난다.
             armWatchdog()
             return
         }
+        pendingActionKey = null
         lastScreenFingerprint = fingerprint
 
         isRequestInFlight = true
@@ -839,17 +933,26 @@ class TestAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * 사용자가 직접 입력해야 하는 민감 화면인지. 두 신호 중 하나면 참으로 본다:
-     * 비밀번호 입력 필드([AccessibilityNodeInfo.isPassword])가 있거나, 화면 라벨에
-     * 결제 비밀번호·생체인증 키워드가 보이거나.
+     * 화면 민감도 분류. FULL_PAUSE가 OVERLAY_ONLY보다 우선한다 — 약관 문구와 비밀번호
+     * 입력이 한 화면에 같이 있으면 사용자 직접 입력이 필요한 쪽으로 본다.
      */
-    private fun isSensitiveInputScreen(candidates: List<Candidate>): Boolean {
-        return candidates.any { candidate ->
-            if (candidate.isPassword) return@any true
-            val label = "${candidate.text.orEmpty()} ${candidate.description.orEmpty()}"
+    private fun classifyScreenSensitivity(candidates: List<Candidate>): ScreenSensitivity {
+        var overlayOnly = false
+        var singleDigitCount = 0
+        for (candidate in candidates) {
+            if (candidate.isPassword) return ScreenSensitivity.FULL_PAUSE
+            val text = candidate.text.orEmpty().trim()
+            if (text.length == 1 && text[0].isDigit()) singleDigitCount++
+            val label = "$text ${candidate.description.orEmpty()}"
                 .lowercase().replace(" ", "")
-            SENSITIVE_SCREEN_KEYWORDS.any { label.contains(it) }
+            if (FULL_PAUSE_KEYWORDS.any { label.contains(it) }) return ScreenSensitivity.FULL_PAUSE
+            if (OVERLAY_ONLY_KEYWORDS.any { label.contains(it) }) overlayOnly = true
         }
+        // 숫자 키패드 휴리스틱: 한 자리 숫자 버튼이 0~9 대부분 보이면 결제 비밀번호 다이얼이다.
+        // 라벨 키워드는 앱·로딩 타이밍에 따라 잡혔다 안 잡혔다 해서(카카오택시에서 실측,
+        // "됐다 안 됐다") 화면 구조 자체로 판정한다 — 어떤 결제 키패드든 숫자 버튼은 있다.
+        if (singleDigitCount >= NUMPAD_DIGIT_THRESHOLD) return ScreenSensitivity.FULL_PAUSE
+        return if (overlayOnly) ScreenSensitivity.OVERLAY_ONLY else ScreenSensitivity.NONE
     }
 
     /**
@@ -965,20 +1068,53 @@ class TestAccessibilityService : AccessibilityService() {
         pendingAnalyzingIndicator = null
     }
 
+    /**
+     * 진행 멘트를 재생·표시한다. **같은 멘트가 연속으로 반복되면** 그대로 되풀이하지 않고
+     * 대기 문구로 바꾼다 — 재탐색 중 서버가 같은 판단을 다시 보내는 경우, 같은 말을
+     * 두 번 들은 사용자는 "이상한데?"라고 느낀다. 대기 문구도 두 종류를 번갈아 써서
+     * 그 자체가 반복되는 느낌을 줄인다.
+     */
+    private fun speakProgress(message: String, onSpoken: (() -> Unit)? = null) {
+        val effective: String
+        if (message.isNotBlank() && message == lastProgressMessage) {
+            progressRepeatCount++
+            effective = WAITING_PHRASES[(progressRepeatCount - 1) % WAITING_PHRASES.size]
+        } else {
+            progressRepeatCount = 0
+            lastProgressMessage = message.ifBlank { null }
+            effective = message
+        }
+        overlay.showOrUpdate(effective.ifBlank { "다음 동작 실행 중" }, CharacterExpression.HAPPY)
+        if (effective.isNotBlank()) {
+            // 멘트가 **다 끝난 뒤에** 후속 동작(클릭 등)을 실행한다 — 말하는 도중 화면이
+            // 넘어가면 멘트가 연달아 밀려 쏟아지는 느낌을 준다(2026-08-26 보고).
+            voice.speak(effective) { onSpoken?.invoke() }
+        } else {
+            onSpoken?.invoke()
+        }
+    }
+
     private fun handleResponse(response: DecideResponse) {
         when (response.status) {
             DecideStatus.CONTINUE -> {
                 consecutiveAskUserCount = 0
-                if (response.voice_message.isNotBlank()) {
-                    voice.speak(response.voice_message)
+                // "~할게요" 식 행동 선언 — 다음 화면은 훑지 말고 바로 이어서 진행한다.
+                skipNextPrescroll = true
+                // 클릭은 멘트가 끝난 뒤에 — 말과 화면 전환이 겹치면 다음 멘트가 밀려서
+                // 안내가 와다다 쏟아진다. 사용자가 한 문장씩 따라올 수 있게 페이스를 맞춘다.
+                val epochAtResponse = sessionEpoch
+                speakProgress(response.voice_message) {
+                    if (!isStaleEpoch(epochAtResponse) && isSessionActive) {
+                        performTargetAction(response)
+                    }
                 }
-                overlay.showOrUpdate(response.voice_message.ifBlank { "다음 동작 실행 중" }, CharacterExpression.HAPPY)
-                performTargetAction(response)
                 // 클릭/입력 후 화면이 바뀌면 onAccessibilityEvent가 다시 스케줄링한다.
             }
 
             DecideStatus.ASK_USER -> {
                 consecutiveAskUserCount++
+                // 정보가 부족하다는 뜻 — 답변을 받은 뒤의 재판단은 화면을 다시 훑어야 한다.
+                skipNextPrescroll = false
                 if (consecutiveAskUserCount > MAX_CONSECUTIVE_ASK_USER) {
                     endSession("답변을 계속 이해하지 못해 중단합니다.")
                     return
@@ -1033,19 +1169,19 @@ class TestAccessibilityService : AccessibilityService() {
      * TTS 재생 중에 STT가 그 소리를 주워듣는 경합을 막는다. 인식 실패 시 같은 질문을 최대
      * [MAX_ASK_RETRIES]번까지 다시 묻는다.
      */
-    private fun askUserWithRetry(question: String, attempt: Int) {
+    private fun askUserWithRetry(question: String, attempt: Int, repeatQuestion: Boolean = true) {
         if (attempt >= MAX_ASK_RETRIES) {
             endSession("답변을 인식하지 못했습니다.")
             return
         }
         val epoch = sessionEpoch
         voice.askAndListen(
-            question = question,
+            question = if (repeatQuestion) question else "말씀해 주세요.",
             onAnswer = { answer ->
                 if (isStaleEpoch(epoch)) return@askAndListen
                 // 사용자가 방금 뭐라고 답했는지는 항상 화면에 보여야 한다 — 잘 알아들었는지
                 // 스스로 확인할 수 있게.
-                overlay.showOrUpdate("입력: $answer", CharacterExpression.FOCUSED)
+                overlay.showOrUpdate("사용자: $answer", CharacterExpression.FOCUSED)
                 routeAnswer(answer)
             },
             onError = { err ->
@@ -1055,8 +1191,17 @@ class TestAccessibilityService : AccessibilityService() {
                 // "조용해서 못 알아들었다"는 정상 상황이다. 상세는 로그로만 남기고,
                 // 화면·표정은 "다시 여쭤본다"는 자연스러운 흐름으로 보여준다.
                 Log.w(TAG, "답변 인식 실패($err) — 재시도 ${attempt + 1}/$MAX_ASK_RETRIES")
-                overlay.showOrUpdate("잘 못 들었어요. 다시 여쭤볼게요.", CharacterExpression.CURIOUS)
-                askUserWithRetry(question, attempt + 1)
+                overlay.showOrUpdate("듣고 있어요. 말씀해 주세요.", CharacterExpression.LISTENING)
+                // 곧바로 재오픈하면 인식이 연쇄로 실패하니 한 박자만 쉰다. 단 **질문 전체를
+                // 다시 읽지 않는다** — 날짜·시간처럼 생각할 시간이 필요한 질문은 사용자가
+                // 답을 고르는 동안 마이크가 먼저 닫히는데, 그때마다 같은 질문을 통째로
+                // 반복하면 "한 번 더 물어보는" 어색한 경험이 된다(2026-08-26 보고).
+                // 짧은 "말씀해 주세요"만 붙이고 바로 다시 듣는다.
+                debounceHandler.postDelayed({
+                    if (!isStaleEpoch(epoch) && isSessionActive) {
+                        askUserWithRetry(question, attempt + 1, repeatQuestion = false)
+                    }
+                }, RETRY_ASK_DELAY_MS)
             },
         )
     }
@@ -1113,11 +1258,30 @@ class TestAccessibilityService : AccessibilityService() {
                 "class=${node.className} text=${node.text} desc=${node.contentDescription} refreshed=$refreshed",
         )
         if (!refreshed) {
-            Log.w(TAG, "노드 refresh 실패 — 화면이 이미 바뀌어 이 노드는 무효화됐을 가능성 높음")
+            // 화면이 이미 바뀌어 죽은 참조다. 이 노드로 클릭/좌표탭을 하면 **낡은 좌표의
+            // 엉뚱한 곳**을 누른다 — 코레일 실측(2026-08-26): 프리스크롤 누적분의 지나간
+            // 화면 요소를 LLM이 골라 refresh 실패 -> 옛 좌표 탭 -> 무반응 3연속 -> 세션 종료.
+            // 액션을 포기하고 화면을 다시 보게 한다.
+            Log.w(TAG, "노드 refresh 실패 — 죽은 참조로는 액션하지 않고 재스캔")
+            skipNextPrescroll = true // 재스캔은 현재 화면만 보면 된다(누적분이 원인이었으므로)
+            notifyAndRetry("화면이 바뀌었네요. 다시 확인할게요.")
+            return
         }
 
+        // 이 대상의 시그니처. 노드 id는 스캔마다 바뀌므로 내용 기반으로 만든다.
+        val actionKey = "${node.viewIdResourceName}|${node.text}|${node.contentDescription}|${response.action_type}"
+
         val actionResult = when (response.action_type) {
-            ActionType.CLICK -> clickWithFallback(node)
+            ActionType.CLICK ->
+                if (actionKey == ineffectiveActionKey) {
+                    // 지난번에 performAction이 true였는데 화면이 안 바뀐 그 대상이다.
+                    // 접근성 클릭을 무시하는 노드로 보고 곧장 진짜 터치(좌표 탭)를 넣는다.
+                    Log.i(TAG, "무효 이력 대상 — performAction 생략, 좌표 탭 강제 (key=$actionKey)")
+                    ineffectiveActionKey = null
+                    tapCenter(node)
+                } else {
+                    clickWithFallback(node)
+                }
             ActionType.SET_TEXT -> {
                 val args = Bundle().apply {
                     putCharSequence(
@@ -1132,6 +1296,7 @@ class TestAccessibilityService : AccessibilityService() {
         }
         Log.i(TAG, "performAction 결과: $actionResult (id=${response.target_node_id})")
         if (actionResult) {
+            pendingActionKey = actionKey
             // 방금 화면을 건드렸다. 전환이 끝나기 전에 읽으면 이전 화면과 새 화면이 섞인
             // 중간 상태를 보게 되므로, 이 시간 동안은 스캔을 막는다.
             val settleDelay = settleDelayFor(response.action_type)
@@ -1199,6 +1364,15 @@ class TestAccessibilityService : AccessibilityService() {
             Log.w(TAG, "좌표 탭 생략 — 대상 중심이 화면 밖 (${bounds.centerX()}, ${bounds.centerY()})")
             return false
         }
+        // 탭 좌표가 우리 오버레이 위면 **오버레이가 터치를 먹는다** — 화면 하단 버튼을 탭했는데
+        // 뒤 앱 대신 말풍선 카드가 눌리던 원인(코레일 실측: (540, 2100) 탭이 전부 무반응).
+        // 탭하는 동안만 오버레이 터치를 통과시키고, 끝나면 되돌린다.
+        val overlayArea = overlay.visibleBounds()
+        val needsBypass = overlayArea != null && overlayArea.contains(bounds.centerX(), bounds.centerY())
+        if (needsBypass) {
+            overlay.setTouchable(false)
+            debounceHandler.postDelayed({ overlay.setTouchable(true) }, TAP_TOUCH_BYPASS_MS)
+        }
         val path = Path().apply { moveTo(bounds.exactCenterX(), bounds.exactCenterY()) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, TAP_DURATION_MS))
@@ -1241,6 +1415,7 @@ class TestAccessibilityService : AccessibilityService() {
      */
     private fun notifyAndRetry(message: String) {
         if (!isSessionActive) return
+        skipNextPrescroll = false // 방금 시도가 실패했다 — 다음 스캔은 화면을 다시 훑는다
         Log.w(TAG, "일시적 문제 — 복구 시도: $message")
         overlay.showOrUpdate(message, CharacterExpression.LISTENING)
         voice.speak(message)
@@ -1276,7 +1451,7 @@ class TestAccessibilityService : AccessibilityService() {
          * 자체가 시스템에서 걸러져서 안 들어온다. */
         private val TARGET_PACKAGES = PRIMARY_PACKAGES + AUXILIARY_PACKAGES
         private const val DEFAULT_GOAL = "카카오톡에서 가장 최근에 찍은 사진 보내줘"
-        private const val DEBOUNCE_MS = 650L
+        private const val DEBOUNCE_MS = 500L
 
         /** 이벤트가 쉬지 않고 계속 들어와도(예: 지도 화면 애니메이션) 이 시간이 지나면 강제로
          * 한 번 스캔한다 — 디바운스 starvation 방지. */
@@ -1287,9 +1462,9 @@ class TestAccessibilityService : AccessibilityService() {
          * 이 시간이 끝나기 전에는 [MAX_BURST_WAIT_MS] 상한에 걸려도 스캔하지 않는다 —
          * 전환 애니메이션 한복판의 화면을 읽는 것이 오판의 주된 원인이었다.
          */
-        private const val SETTLE_DELAY_CLICK_MS = 1_300L
-        private const val SETTLE_DELAY_SET_TEXT_MS = 1_500L
-        private const val SETTLE_DELAY_SCROLL_MS = 1_800L
+        private const val SETTLE_DELAY_CLICK_MS = 800L
+        private const val SETTLE_DELAY_SET_TEXT_MS = 1_000L
+        private const val SETTLE_DELAY_SCROLL_MS = 1_200L
 
         /** 이보다 오래 걸리는 요청에만 "분석 중" 스피너를 보여준다. */
         private const val ANALYZING_INDICATOR_DELAY_MS = 3000L
@@ -1298,11 +1473,16 @@ class TestAccessibilityService : AccessibilityService() {
         private const val SYNTHESIZED_LABEL_MAX_PARTS = 3
         private const val SYNTHESIZED_LABEL_MAX_LENGTH = 60
 
+        /** 인식 실패 후 다시 묻기까지 쉬는 시간. 마이크 재오픈 연쇄 실패 방지 + 사용자 숨 고르기. */
+        private const val RETRY_ASK_DELAY_MS = 900L
+
         /** STT 인식 실패 시 같은 질문을 다시 묻는 최대 횟수. */
         private const val MAX_ASK_RETRIES = 3
 
         /** 세션 하나에서 ASK_USER가 연속으로 나올 수 있는 최대 횟수 — 무한 되묻기 방지. */
-        private const val MAX_CONSECUTIVE_ASK_USER = 5
+        // 기차 예매는 필수 슬롯이 4개(출발역·도착역·날짜·시간)라 정상 흐름만으로도 되묻기가
+        // 4번 이어진다. 5면 추가 확인 한두 번에 세션이 끊기므로 여유를 둔다.
+        private const val MAX_CONSECUTIVE_ASK_USER = 7
 
         /** 동작 실행 후 이 시간 안에 화면 변경 이벤트가 없으면 스스로 재스캔한다. [armWatchdog] 참고. */
         private const val WATCHDOG_TIMEOUT_MS = 7_000L
@@ -1322,6 +1502,9 @@ class TestAccessibilityService : AccessibilityService() {
         /** 좌표 탭 폴백에서 손가락을 대고 있는 시간. */
         private const val TAP_DURATION_MS = 60L
 
+        /** 오버레이 위 좌표를 탭할 때 오버레이 터치를 통과시켜 두는 시간. */
+        private const val TAP_TOUCH_BYPASS_MS = 400L
+
         /** 되묻기 답변을 이어붙인 goal의 길이 상한. */
         private const val MAX_GOAL_LENGTH = 300
 
@@ -1330,11 +1513,28 @@ class TestAccessibilityService : AccessibilityService() {
         private const val PRESCROLL_STEP_DELAY_MS = 500L
         private const val PRESCROLL_SETTLE_MS = 350L
 
-        /** [isSensitiveInputScreen]이 보는 민감 화면 키워드. 소문자·공백 제거 후 부분 일치.
+        /** 같은 진행 멘트가 반복될 때 대신 말할 대기 문구. 번갈아 사용한다. */
+        private val WAITING_PHRASES = listOf(
+            "잠시만 기다려 주세요.",
+            "조금만 더 확인하고 있어요.",
+        )
+
+        /** [classifyScreenSensitivity]가 보는 완전 정지 키워드. 소문자·공백 제거 후 부분 일치.
          * "인증"처럼 광범위한 단어는 일부러 뺐다 — 본인인증 '버튼'이 있는 일반 화면까지
          * 잡아서 오버레이가 엉뚱하게 사라진다. */
-        private val SENSITIVE_SCREEN_KEYWORDS = setOf(
+        private val FULL_PAUSE_KEYWORDS = setOf(
             "비밀번호", "지문", "생체", "페이스아이디", "faceid",
+        )
+
+        /** 이 개수 이상의 한 자리 숫자 버튼이 보이면 결제 키패드로 판정한다.
+         * 0~9 열 개 중 스캔이 한둘 놓쳐도 잡히도록 9로 둔다. 일반 화면에 한 자리 숫자
+         * 노드가 9개나 흩어져 있을 일은 사실상 없다. */
+        private const val NUMPAD_DIGIT_THRESHOLD = 9
+
+        /** 오버레이만 걷는 화면(자동화는 계속). "동의"만으로는 일반 화면(수신 동의 버튼 등)까지
+         * 잡혀서 "약관"만 본다 — 체크박스는 AI가 눌러야 하므로 자동 조작을 멈추면 안 된다. */
+        private val OVERLAY_ONLY_KEYWORDS = setOf(
+            "약관",
         )
 
         // 중단 명령 키워드/확인 응답 목록은 SpeechCommands로 옮겼다 — 단위 테스트가 붙어 있는

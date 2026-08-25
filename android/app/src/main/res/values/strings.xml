@@ -42,6 +42,7 @@
     <string name="main_status_waiting_wake">웨이크 문구 대기 중: \"%1$s\"</string>
     <string name="main_status_wake_detected">인식됨! 요청을 말씀해주세요…</string>
     <string name="main_prompt_after_wake">네, 말씀하세요.</string>
+    <string name="main_prompt_goal_retry">잘 못 알아들었어요. 기차 예매나 사진 보내기처럼 다시 말씀해 주세요.</string>
     <string name="main_status_answer_failed">요청을 듣지 못했습니다. 다시 웨이크 문구부터 말씀해주세요.</string>
     <string name="main_status_goal_captured">목표: %1$s</string>
     <string name="main_status_listening">🎤 듣고 있어요… 말씀해주세요</string>

@@ -79,7 +79,10 @@ class WakeAndLaunchActivity : Activity() {
             Log.w(TAG, "$targetPackage 를 찾지 못함 (미설치?)")
             return
         }
-        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        // CLEAR_TASK: 대상 앱이 이미 떠 있으면(채팅방 안, 결제 화면 등) 그 화면 스택을
+        // 통째로 걷어내고 **메인 화면부터** 새로 시작한다. 예전 CLEAR_TOP은 남아 있던
+        // 화면에서 이어져서, LLM이 낯선 중간 화면에서 자동화를 시작해 헤맸다.
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         startActivity(launchIntent)
     }
 
@@ -91,7 +94,14 @@ class WakeAndLaunchActivity : Activity() {
 
         /** 코레일톡을 가리키는 것으로 보는 키워드. STT가 "KTX"를 "케이티엑스"로 받아쓰는 경우가
          * 있어 둘 다 넣는다. 소문자로 비교하므로 전부 소문자로 적을 것. */
-        private val KORAIL_KEYWORDS = listOf("기차", "열차", "코레일", "ktx", "케이티엑스", "승차권", "무궁화호", "새마을호")
+        // "예매"를 넣은 이유: STT가 첫 음절을 놓쳐 "기차 예매해줘"가 "차 예매해줘"로 들어오는
+        // 일이 실제로 있었다(2026-08-26). 지원 앱 중 예매가 있는 곳은 코레일뿐이라 안전하다.
+        private val KORAIL_KEYWORDS = listOf("기차", "열차", "코레일", "ktx", "케이티엑스", "승차권", "무궁화호", "새마을호", "예매")
+
+        /** 카카오톡을 가리키는 것으로 보는 키워드. "엄마한테 사진 보내줘"처럼 앱 이름 없이
+         * 오는 전송 요청도 잡아야 해서 사진/메시지류를 포함한다 — 지원 3개 앱 중 무언가를
+         * '보내는' 곳은 카카오톡뿐이라 안전하다. */
+        private val KAKAO_KEYWORDS = listOf("카톡", "카카오톡", "사진", "메시지", "메세지", "보내")
 
         /**
          * goal 문장에 어떤 앱을 가리키는 키워드가 있는지 보고 실행할 패키지를 정한다.
@@ -102,13 +112,28 @@ class WakeAndLaunchActivity : Activity() {
          * (companion에 둔 이유: 오버레이 "중단하기" 후 새 요청을 받은 TestAccessibilityService도
          * 같은 규칙으로 대상 앱을 정해야 해서.)
          */
-        fun resolveTargetPackage(goal: String?): String {
+        /**
+         * @param defaultPackage 키워드가 하나도 안 잡혔을 때 쓸 앱. 웨이크 진입(첫 요청)은
+         * 카카오톡이 기본이지만, **자동화 도중 "중단하기" 후 받은 새 요청**은 지금 쓰던 앱이
+         * 기본이어야 한다 — 코레일 진행 중에 "처음부터 다시 해줘"라고 했는데 키워드가 없다고
+         * 카카오톡으로 튀어버리는 문제의 수정.
+         */
+        fun resolveTargetPackage(goal: String?, defaultPackage: String = KAKAOTALK_PACKAGE): String =
+            matchTargetPackage(goal) ?: defaultPackage
+
+        /**
+         * goal이 지원 앱 중 하나를 **명시적으로** 가리키는지. 아무 키워드도 안 잡히면 null —
+         * 호출부가 "애매한 요청"으로 보고 되묻는 데 쓴다. STT가 "기차 예매해줘"를 "애매해서"로
+         * 오인식했을 때, 예전엔 기본값(카카오톡)으로 조용히 넘어가 엉뚱한 앱이 열렸다(2026-08-26).
+         */
+        fun matchTargetPackage(goal: String?): String? {
             val text = goal.orEmpty()
             val lower = text.lowercase()
             return when {
                 text.contains("택시") -> KAKAOTAXI_PACKAGE
                 KORAIL_KEYWORDS.any { lower.contains(it) } -> KORAIL_PACKAGE
-                else -> KAKAOTALK_PACKAGE
+                KAKAO_KEYWORDS.any { text.contains(it) } -> KAKAOTALK_PACKAGE
+                else -> null
             }
         }
         private const val WAKE_LOCK_TIMEOUT_MS = 10_000L

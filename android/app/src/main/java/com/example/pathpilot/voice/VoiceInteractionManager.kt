@@ -41,6 +41,9 @@ class VoiceInteractionManager(context: Context) {
      * 안 그러면 listenOnce가 연달아 두 번 불렸을 때 recognizer가 두 개 열리는 문제가 재발한다. */
     private var pendingStart: Runnable? = null
 
+    /** 마지막으로 recognizer를 destroy()한 시각. 재오픈 대기를 "파괴 직후"에만 적용하기 위한 기준. */
+    private var lastRecognizerDestroyAt = 0L
+
     /**
      * TextToSpeech의 [UtteranceProgressListener] 콜백은 메인 스레드가 아닌 TTS 내부 스레드에서
      * 온다(공식 문서에 명시됨). 여기서 곧바로 [SpeechRecognizer.createSpeechRecognizer]를 부르면
@@ -199,15 +202,20 @@ class VoiceInteractionManager(context: Context) {
         }
         stopListening()
         // 방금 막 destroy()한 이전 recognizer가 마이크/오디오 리소스를 완전히 놓기 전에 새
-        // recognizer를 바로 열면, 일부 기기(이번에 겪은 삼성 실기기 포함)에서 새 세션이 사용자가
-        // 말을 시작하기도 전에 "무음(NO_SPEECH_DETECTED)"으로 즉시 오판된다(실측: 마이크 연 지
-        // ~100ms 만에 에러 — 사람이 그렇게 빨리 말할 수 없다). 아주 짧게 텀을 둬서 이 레이스를 없앤다.
+        // recognizer를 바로 열면, 일부 기기(삼성 실기기 포함)에서 새 세션이 사용자가 말을
+        // 시작하기도 전에 "무음"으로 즉시 오판된다. 그래서 파괴 직후에는 텀을 둔다.
+        //
+        // **단, 이 대기는 "파괴 직후"에만 적용한다.** 파괴한 recognizer가 없는데도 무조건
+        // 기다리면 질문 TTS가 끝나고 사용자가 곧장 말을 시작할 때 첫 음절이 잘린다 —
+        // 실제로 "기차 예매해줘"가 "차 예매해줘"로 들어와 엉뚱한 앱이 열렸다(2026-08-26).
+        val sinceDestroy = android.os.SystemClock.uptimeMillis() - lastRecognizerDestroyAt
+        val delay = (MIC_REOPEN_DELAY_MS - sinceDestroy).coerceIn(0L, MIC_REOPEN_DELAY_MS)
         val runnable = Runnable {
             if (myGeneration != generation) return@Runnable
             startRecognition(myGeneration, onResult, onError, onListeningChanged)
         }
         pendingStart = runnable
-        mainHandler.postDelayed(runnable, MIC_REOPEN_DELAY_MS)
+        mainHandler.postDelayed(runnable, delay)
     }
 
     private fun startRecognition(
@@ -381,8 +389,11 @@ class VoiceInteractionManager(context: Context) {
     fun stopListening() {
         pendingStart?.let { mainHandler.removeCallbacks(it) }
         pendingStart = null
-        speechRecognizer?.destroy()
-        speechRecognizer = null
+        if (speechRecognizer != null) {
+            speechRecognizer?.destroy()
+            speechRecognizer = null
+            lastRecognizerDestroyAt = android.os.SystemClock.uptimeMillis()
+        }
     }
 
     fun shutdown() {
@@ -398,7 +409,7 @@ class VoiceInteractionManager(context: Context) {
         private const val WAKE_RELISTEN_DELAY_MS = 400L
 
         /** 이전 recognizer를 destroy한 직후 곧바로 새로 열 때 생기는 "즉시 무음 오판" 레이스를 피하는 텀. */
-        private const val MIC_REOPEN_DELAY_MS = 250L
+        private const val MIC_REOPEN_DELAY_MS = 450L
 
         private val WHITESPACE_REGEX = Regex("\\s+")
     }

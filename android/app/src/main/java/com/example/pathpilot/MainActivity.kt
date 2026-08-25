@@ -223,7 +223,7 @@ class MainActivity : AppCompatActivity() {
                 transcriptText.text = wakePhrase
                 voice.askAndListen(
                     question = getString(R.string.main_prompt_after_wake),
-                    onAnswer = { goal -> launchKakaoWithGoal(goal) },
+                    onAnswer = { goal -> handleCapturedGoal(goal, attempt = 0) },
                     onError = {
                         statusText.text = getString(R.string.main_status_answer_failed)
                         restartWakeListening()
@@ -247,7 +247,42 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun launchKakaoWithGoal(goal: String) {
+    /**
+     * 웨이크 후 받아쓴 요청을 검증하고 나서 자동화로 넘긴다.
+     *
+     * STT가 "기차 예매해줘"를 "애매해서"처럼 엉뚱하게 받아쓰는 일이 실제로 있다(2026-08-26).
+     * 예전엔 무슨 문장이든 기본 앱(카카오톡)으로 조용히 넘어가 엉뚱한 앱이 열렸다.
+     * 이제 요청이 지원 앱 어느 것도 가리키지 않으면("애매하면") 이동하지 않고 되묻는다.
+     */
+    private fun handleCapturedGoal(goal: String, attempt: Int) {
+        transcriptText.text = goal
+        if (WakeAndLaunchActivity.matchTargetPackage(goal) != null) {
+            launchTargetWithGoal(goal)
+            return
+        }
+        if (attempt >= MAX_GOAL_RETRIES) {
+            statusText.text = getString(R.string.main_status_answer_failed)
+            restartWakeListening()
+            return
+        }
+        voice.askAndListen(
+            question = getString(R.string.main_prompt_goal_retry),
+            onAnswer = { retried -> handleCapturedGoal(retried, attempt + 1) },
+            onError = {
+                statusText.text = getString(R.string.main_status_answer_failed)
+                restartWakeListening()
+            },
+            onListeningChanged = { isListening ->
+                statusText.text = if (isListening) {
+                    ""
+                } else {
+                    getString(R.string.main_status_processing)
+                }
+            },
+        )
+    }
+
+    private fun launchTargetWithGoal(goal: String) {
         transcriptText.text = goal
         startActivity(
             Intent(this, WakeAndLaunchActivity::class.java).apply {
@@ -260,5 +295,8 @@ class MainActivity : AppCompatActivity() {
         /** 접근성 서비스 생존을 판정하기 전에 기다리는 시간. 프로세스가 막 뜨는 참이면
          * onServiceConnected가 아직 안 왔을 수 있어서 곧바로 판정하면 오탐이 난다. */
         const val SERVICE_CHECK_DELAY_MS = 1_200L
+
+        /** 요청이 애매할 때(지원 앱 미매칭) 다시 물어보는 최대 횟수. 넘으면 웨이크 대기로 복귀. */
+        const val MAX_GOAL_RETRIES = 2
     }
 }
