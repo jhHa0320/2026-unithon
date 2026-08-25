@@ -11,7 +11,7 @@ client = TestClient(app)
 
 BASE_ELEMENT = {
     "id": 1,
-    "text": "알림 끄기",
+    "text": "조회",
     "content_description": None,
     "class_name": "android.widget.TextView",
     "clickable": True,
@@ -22,8 +22,8 @@ BASE_ELEMENT = {
 def _payload(elements: list[dict] | None = None, session_id: str = "test-session") -> dict:
     return {
         "session_id": session_id,
-        "goal": "채팅방 알림 끄기",
-        "app_package": "com.kakao.talk",
+        "goal": "내일 아침 서울에서 부산 가는 KTX 예매해줘",
+        "app_package": "com.korail.talk",
         "elements": elements if elements is not None else [dict(BASE_ELEMENT)],
         "history": None,
     }
@@ -62,7 +62,7 @@ def test_sensitive_keyword_element_excluded_from_ai_request() -> None:
         dict(BASE_ELEMENT),
         {
             "id": 2,
-            "text": "송금하기",
+            "text": "결제하기",
             "content_description": None,
             "class_name": "android.widget.Button",
             "clickable": True,
@@ -163,6 +163,6 @@ def test_logs_do_not_contain_sensitive_text(caplog) -> None:
         client.post("/api/v1/decide", json=_payload())
 
     for record in caplog.records:
-        assert "알림 끄기" not in record.getMessage()
+        assert "조회" not in record.getMessage()
         assert not hasattr(record, "text")
         assert not hasattr(record, "content_description")

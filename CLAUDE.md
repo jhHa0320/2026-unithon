@@ -3,7 +3,7 @@
 ## 1. 프로젝트 개요
 
 - 핵심 철학: "Guide, not Autopilot" — AI는 UI를 해석해 다음 위치를 안내하고, 실제 클릭·결제·승인 등 최종 행동은 항상 사용자가 한다.
-- 타겟 환경: Android Mobile (Kotlin), 초기 MVP 대상 앱: 카카오톡 (채팅방 알림 끄기, 차단 친구 해제)
+- 타겟 환경: Android Mobile (Kotlin), 초기 MVP 대상 앱: 코레일+ (KTX 예매 시나리오 — 예: 서울→부산, 출발역/도착역/날짜/좌석 선택 후 결제 대기 화면까지 자동 진행)
 - **이 레포는 백엔드(FastAPI)와 Android 클라이언트(Kotlin)를 함께 포함하는 모노레포다.** 폴더로 담당 영역이 나뉜다.
 
 ### 데이터 흐름
@@ -43,6 +43,14 @@
 4. **보안 통제 우회 금지**: Google Play 접근성 API 정책 준수 범위 내에서만 동작.
 5. **신뢰도 게이트**: LLM confidence가 임계값 미만이면 백엔드가 응답을 무시하고 `status=ASK_USER`로 강제 override.
 6. **민감정보 마스킹**: 비밀번호/주민번호/계좌번호 등은 LLM 전송 전 서버단에서 마스킹.
+
+## 4-1. 결제·예매 연동 범위 (In-Scope / Out-of-Scope)
+
+이번 해커톤 스코프에서는 실제 결제망에 연결하지 않는다. `docs/planning/`의 관련 섹션과 동일한 경계를 따른다.
+
+- **In-Scope**: 앱에 등록해 둔 결제수단(Mock)이 예매 앱과 연동되어 결제·예매가 완료되는 것처럼 보이는 UI/UX 데모 플로우. Android 클라이언트 로컬 상태 전환만으로 구현(예: `PaymentMockRepository.completePayment()`가 delay 후 성공 결과를 반환).
+- **Out-of-Scope**: 실제 PG사 결제 승인/취소 연동, 외부 예매 플랫폼(코레일·SRT 등)과의 Real-time API 결제 확정. backend는 이런 연동을 구현하지 않는다.
+- Mock 결제 완료 화면도 반드시 "결제 대기 확인 → 사용자 확인 탭" 이후에만 진행한다. 안전 원칙 1·2번(자율 클릭 금지, 금융/거래 자동 실행 금지)은 Mock 플로우에도 동일하게 적용되며, Mock 화면은 실제 예매 앱의 결제 화면을 accessibility로 조작해 만들지 않고 우리 앱 자체 오버레이에서만 렌더링한다.
 
 ## 5. API 계약 — `POST /api/v1/decide`
 
@@ -168,6 +176,7 @@ project-root/
 ## 12. 하지 말 것
 
 - Redis, 외부 DB 등 스코프 밖 인프라 도입 금지
+- 실제 PG/외부 예매 플랫폼 결제 확정 API 연동 금지 — 결제는 Android 로컬 Mock으로만 구현 (4-1 참고)
 - confidence 임계값, 위험 키워드 목록 하드코딩 금지 — config.py에서 관리
 - 빈 elements 리스트 등 예외 상황에서 서버가 죽지 않고 항상 에러 포맷으로 응답하게 할 것
 - 다른 담당자 폴더(backend가 아니면 android/, 그 반대도 마찬가지)의 코드를 사전 협의 없이 수정하지 말 것
