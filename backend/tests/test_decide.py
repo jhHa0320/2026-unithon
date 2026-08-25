@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.routers.decide import get_ai_client
 from backend.schemas.response import DecideResponse
+from backend.services.ai_client import AIClientError, MockAIClient
 
 client = TestClient(app)
 
@@ -60,7 +61,13 @@ def _response(**overrides) -> DecideResponse:
 
 
 @pytest.fixture(autouse=True)
-def _clear_overrides():
+def _isolate_ai_client():
+    """기본 클라이언트를 Mock으로 고정한다.
+
+    이게 없으면 개발자 .env에 GEMINI_API_KEY가 있을 때 테스트가 실제 API를 호출해
+    과금되고, 응답이 비결정적이라 테스트가 흔들린다. 개별 테스트는 이 위에 덮어쓴다.
+    """
+    app.dependency_overrides[get_ai_client] = lambda: MockAIClient()
     yield
     app.dependency_overrides.pop(get_ai_client, None)
 
@@ -166,6 +173,39 @@ def test_target_without_action_type_returns_unsupported() -> None:
     body = client.post("/api/v1/decide", json=_payload()).json()
 
     assert body["status"] == "UNSUPPORTED"
+
+
+def test_ai_client_error_returns_unsupported_not_500() -> None:
+    """LLM 호출 실패에도 서버는 계약 스키마로 응답해야 한다 (CLAUDE.md 12장)."""
+
+    class FailingAIClient:
+        def decide(self, goal, app_package, elements, history, user_speech=None):
+            raise AIClientError("Gemini API error 503: unavailable")
+
+    app.dependency_overrides[get_ai_client] = lambda: FailingAIClient()
+
+    response = client.post("/api/v1/decide", json=_payload())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "UNSUPPORTED"
+    assert body["target_node_id"] is None
+    assert body["voice_message"]
+
+
+def test_ai_client_error_detail_is_not_leaked_to_client() -> None:
+    """API 키나 내부 오류 문자열이 응답 본문으로 새면 안 된다."""
+
+    class FailingAIClient:
+        def decide(self, goal, app_package, elements, history, user_speech=None):
+            raise AIClientError("Gemini API error 401: bad key AIzaSyTOPSECRET")
+
+    app.dependency_overrides[get_ai_client] = lambda: FailingAIClient()
+
+    raw = client.post("/api/v1/decide", json=_payload()).text
+
+    assert "AIzaSyTOPSECRET" not in raw
+    assert "401" not in raw
 
 
 def test_ai_client_timeout_returns_unsupported(monkeypatch) -> None:
