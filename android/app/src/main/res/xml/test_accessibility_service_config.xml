@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  멤버 A(나) 개인 테스트용 AccessibilityService 설정.
+  카카오톡 하나만 대상으로 제한해서, 실수로 다른 앱(특히 실제 결제가 자동 실행되는 코레일+)에
+  적용되지 않도록 한다. 멤버 C가 정식 서비스를 만들면 이 파일과 TestAccessibilityService는
+  지운다 — docs/ARCHITECTURE.md §2 참고.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canRetrieveWindowContent="true"
+    android:notificationTimeout="300"
+    android:packageNames="com.kakao.talk"
+    android:description="@string/test_accessibility_service_description" />

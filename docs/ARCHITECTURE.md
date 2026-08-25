@@ -275,5 +275,8 @@ pytest backend/tests
 ## 11. 관련 문서
 
 - 규칙/계약의 최종 소스: [`CLAUDE.md`](../CLAUDE.md)
+- API 계약 정본(v2.0): [`dumps/API_SPEC.md`](../dumps/API_SPEC.md)
+- 팀 역할/체크리스트: [`dumps/TODO.md`](../dumps/TODO.md)
 - 제품 배경: [`docs/planning/01_PRD_AI_Digital_Guide.md`](planning/01_PRD_AI_Digital_Guide.md)
 - 구현 단계별 가이드(코딩 에이전트 프롬프트 예시 포함): [`docs/planning/05_Technical_Implementation_Guide.md`](planning/05_Technical_Implementation_Guide.md)
+- 작업일지(실기기 디버깅 기록 등): [`docs/worklog/`](worklog/)
