@@ -68,7 +68,7 @@ async def decide(
 
     # 1. 요청 검증 — elements 빈 배열/bounds 정합성은 schemas/request.py validator가 처리(위반 시 422)
 
-    # 2. 민감 요소 탐지 — 로깅용 신호일 뿐, elements를 걸러내지 않는다(결제까지 자동 진행)
+    # 2. 민감 요소 탐지 — 로깅용 신호일 뿐, elements를 걸러내지 않는다(전송까지 자동 진행)
     sensitive_elements = safety.detect_sensitive_elements(
         request.elements, settings.SENSITIVE_KEYWORDS
     )

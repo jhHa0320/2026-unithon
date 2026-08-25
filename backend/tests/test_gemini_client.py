@@ -16,7 +16,7 @@ from backend.services.ai_client import (
 ELEMENTS = [
     ElementDTO(
         id=3,
-        text="승차권 예매",
+        text="김엄마",
         content_description=None,
         class_name="android.widget.Button",
         clickable=True,
@@ -69,8 +69,8 @@ def _decision_json(**overrides) -> str:
         "target_node_id": 3,
         "action_type": "CLICK",
         "input_value": "",
-        "voice_message": "승차권 예매를 누를게요.",
-        "reasoning": "목표가 예매이고 해당 버튼이 진입점",
+        "voice_message": "김엄마 님 대화방을 열게요.",
+        "reasoning": "수신자가 김엄마로 확정되어 대화방을 연다",
         "confidence": 0.9,
         "status": "CONTINUE",
     }
@@ -84,25 +84,25 @@ def _decision_json(**overrides) -> str:
 def test_click_decision_maps_to_contract(monkeypatch) -> None:
     client, _ = _make_client(monkeypatch, text=_decision_json())
 
-    response = client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+    response = client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
     assert response.target_node_id == 3
     assert response.action_type == "CLICK"
     assert response.input_value is None  # 빈 문자열은 None으로 정규화
     assert response.status == "CONTINUE"
-    assert response.voice_message == "승차권 예매를 누를게요."
-    assert response.instruction == "목표가 예매이고 해당 버튼이 진입점"
+    assert response.voice_message == "김엄마 님 대화방을 열게요."
+    assert response.instruction == "수신자가 김엄마로 확정되어 대화방을 연다"
 
 
 def test_set_text_decision_keeps_input_value(monkeypatch) -> None:
     client, _ = _make_client(
-        monkeypatch, text=_decision_json(action_type="SET_TEXT", input_value="서울")
+        monkeypatch, text=_decision_json(action_type="SET_TEXT", input_value="김엄마")
     )
 
-    response = client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+    response = client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
     assert response.action_type == "SET_TEXT"
-    assert response.input_value == "서울"
+    assert response.input_value == "김엄마"
 
 
 def test_sentinel_target_becomes_none(monkeypatch) -> None:
@@ -113,11 +113,11 @@ def test_sentinel_target_becomes_none(monkeypatch) -> None:
             target_node_id=-1,
             action_type="NONE",
             status="ASK_USER",
-            voice_message="어느 역에서 출발하시나요?",
+            voice_message="어느 분에게 보낼까요?",
         ),
     )
 
-    response = client.decide("기차표 예매해줘", "com.korail.talk", ELEMENTS, None, None)
+    response = client.decide("사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
     assert response.target_node_id is None
     assert response.action_type is None
@@ -129,10 +129,10 @@ def test_stale_action_fields_are_cleared_when_no_target(monkeypatch) -> None:
     """target은 없는데 action_type/input_value가 남아 온 경우에도 비워야 한다."""
     client, _ = _make_client(
         monkeypatch,
-        text=_decision_json(target_node_id=-1, action_type="SET_TEXT", input_value="서울"),
+        text=_decision_json(target_node_id=-1, action_type="SET_TEXT", input_value="김엄마"),
     )
 
-    response = client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+    response = client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
     assert response.target_node_id is None
     assert response.action_type is None
@@ -145,7 +145,7 @@ def test_stale_action_fields_are_cleared_when_no_target(monkeypatch) -> None:
 def test_request_carries_model_and_config(monkeypatch) -> None:
     client, models = _make_client(monkeypatch, text=_decision_json())
 
-    client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+    client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
     call = models.calls[0]
     config = call["config"]
@@ -162,7 +162,7 @@ def test_timeout_is_milliseconds_and_below_router_budget(monkeypatch) -> None:
     from backend.routers.decide import AI_CLIENT_TIMEOUT_SECONDS
 
     client, models = _make_client(monkeypatch, text=_decision_json())
-    client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+    client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
     timeout_ms = models.calls[0]["config"].http_options.timeout
     assert timeout_ms >= GEMINI_MIN_DEADLINE_SECONDS * 1000
@@ -187,7 +187,7 @@ def test_timeout_below_gemini_minimum_is_clamped(monkeypatch) -> None:
     client = GeminiAIClient(
         api_key="k", model="gemini-3.6-flash", thinking_level="low", timeout_seconds=4.5
     )
-    client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+    client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
     assert models.calls[0]["config"].http_options.timeout == GEMINI_MIN_DEADLINE_SECONDS * 1000
 
@@ -195,7 +195,7 @@ def test_timeout_below_gemini_minimum_is_clamped(monkeypatch) -> None:
 def test_automatic_function_calling_is_disabled(monkeypatch) -> None:
     """툴을 안 쓰므로 AFC를 끈다. 켜져 있으면 호출마다 경고가 찍힌다."""
     client, models = _make_client(monkeypatch, text=_decision_json())
-    client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+    client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
     assert models.calls[0]["config"].automatic_function_calling.disable is True
 
@@ -203,11 +203,11 @@ def test_automatic_function_calling_is_disabled(monkeypatch) -> None:
 def test_input_includes_elements_and_user_speech(monkeypatch) -> None:
     client, models = _make_client(monkeypatch, text=_decision_json())
 
-    client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, "응 그래")
+    client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, "응 그래")
 
     payload = json.loads(models.calls[0]["contents"])
-    assert payload["goal"] == "예매해줘"
-    assert payload["app"] == "com.korail.talk"
+    assert payload["goal"] == "엄마한테 사진 보내줘"
+    assert payload["app"] == "com.kakao.talk"
     assert payload["elements"][0]["id"] == 3
     assert payload["elements"][0]["class"] == "Button"  # 패키지 접두사 제거
     assert payload["user_reply"] == "응 그래"
@@ -216,7 +216,7 @@ def test_input_includes_elements_and_user_speech(monkeypatch) -> None:
 def test_input_omits_empty_optional_fields(monkeypatch) -> None:
     client, models = _make_client(monkeypatch, text=_decision_json())
 
-    client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+    client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
     payload = json.loads(models.calls[0]["contents"])
     assert "user_reply" not in payload
@@ -231,14 +231,14 @@ def test_api_exception_becomes_ai_client_error(monkeypatch) -> None:
     client, _ = _make_client(monkeypatch, raises=RuntimeError("boom"))
 
     with pytest.raises(AIClientError):
-        client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+        client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
 
 def test_empty_output_becomes_ai_client_error(monkeypatch) -> None:
     client, _ = _make_client(monkeypatch, text="")
 
     with pytest.raises(AIClientError):
-        client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+        client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
 
 def test_none_output_becomes_ai_client_error(monkeypatch) -> None:
@@ -246,21 +246,21 @@ def test_none_output_becomes_ai_client_error(monkeypatch) -> None:
     client, _ = _make_client(monkeypatch, text=None)
 
     with pytest.raises(AIClientError):
-        client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+        client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
 
 def test_malformed_json_becomes_ai_client_error(monkeypatch) -> None:
     client, _ = _make_client(monkeypatch, text="이것은 JSON이 아닙니다")
 
     with pytest.raises(AIClientError):
-        client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+        client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
 
 def test_schema_mismatch_becomes_ai_client_error(monkeypatch) -> None:
     client, _ = _make_client(monkeypatch, text=json.dumps({"target_node_id": 3}))
 
     with pytest.raises(AIClientError):
-        client.decide("예매해줘", "com.korail.talk", ELEMENTS, None, None)
+        client.decide("엄마한테 사진 보내줘", "com.kakao.talk", ELEMENTS, None, None)
 
 
 def test_missing_sdk_raises_clear_error(monkeypatch) -> None:

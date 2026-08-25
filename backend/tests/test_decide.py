@@ -28,8 +28,8 @@ def _payload(
 ) -> dict:
     return {
         "session_id": session_id,
-        "goal": "내일 아침 서울에서 부산 가는 KTX 예매해줘",
-        "app_package": "com.korail.talk",
+        "goal": "엄마한테 사진 보내줘",
+        "app_package": "com.kakao.talk",
         "elements": elements if elements is not None else [dict(BASE_ELEMENT)],
         "user_speech": user_speech,
         "history": None,
@@ -226,11 +226,11 @@ def test_ai_client_timeout_returns_unsupported(monkeypatch) -> None:
     assert body["reason"] == "AI 응답 지연"
 
 
-# --- 결제 자동 진행 (차단하지 않아야 함) -----------------------------------
+# --- 전송 자동 진행 (차단하지 않아야 함) -----------------------------------
 
 
-def test_payment_element_is_not_filtered_from_ai_input() -> None:
-    """결제 버튼은 LLM 입력에서 제외되지 않는다. 에이전트가 결제까지 완결해야 하므로."""
+def test_send_element_is_not_filtered_from_ai_input() -> None:
+    """전송 버튼은 LLM 입력에서 제외되지 않는다. 에이전트가 전송까지 완결해야 하므로."""
     captured: list = []
 
     class SpyAIClient:
@@ -240,18 +240,18 @@ def test_payment_element_is_not_filtered_from_ai_input() -> None:
 
     app.dependency_overrides[get_ai_client] = lambda: SpyAIClient()
 
-    elements = [{**BASE_ELEMENT, "text": "결제하기"}]
+    elements = [{**BASE_ELEMENT, "text": "전송"}]
     client.post("/api/v1/decide", json=_payload(elements=elements))
 
     assert [element.id for element in captured] == [1]
-    assert captured[0].text == "결제하기"
+    assert captured[0].text == "전송"
 
 
-def test_payment_element_can_be_clicked() -> None:
-    """결제 버튼을 target으로 지목한 응답이 게이트에서 걸리지 않고 그대로 통과한다."""
-    _stub_client(_response(instruction="결제 버튼 클릭"))
+def test_send_element_can_be_clicked() -> None:
+    """전송 버튼을 target으로 지목한 응답이 게이트에서 걸리지 않고 그대로 통과한다."""
+    _stub_client(_response(instruction="전송 버튼 클릭"))
 
-    elements = [{**BASE_ELEMENT, "text": "결제하기"}]
+    elements = [{**BASE_ELEMENT, "text": "전송"}]
     body = client.post("/api/v1/decide", json=_payload(elements=elements)).json()
 
     assert body["status"] == "CONTINUE"
@@ -359,13 +359,13 @@ def test_health_endpoint() -> None:
 @pytest.mark.parametrize(
     ("word", "expected"),
     [
-        ("승차권 예매", "를"),  # 받침 없음
-        ("결제하기", "를"),
+        ("사진 보내기", "를"),  # 받침 없음
+        ("보내기", "를"),
         ("조회", "를"),
         ("서울", "을"),  # 받침 있음
         ("부산행", "을"),
         ("확인", "을"),
-        ("KTX", ""),  # 한글이 아니면 조사 생략
+        ("PDF", ""),  # 한글이 아니면 조사 생략
     ],
 )
 def test_object_particle_matches_final_consonant(word: str, expected: str) -> None:

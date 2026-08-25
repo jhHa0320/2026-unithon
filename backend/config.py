@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     # 이보다 낮게 설정할 수 없다. 실측 응답은 2초대이므로 이 값은 예산이 아니라 안전망이다.
     GEMINI_TIMEOUT_SECONDS: float = 10.0
     SENSITIVE_KEYWORDS: list[str] = [
+        "전송",
+        "보내기",
         "송금",
         "이체",
         "결제",

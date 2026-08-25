@@ -3,8 +3,8 @@
 LLM 응답을 그대로 신뢰하지 않는다는 것이 이 모듈의 전제다.
 마스킹은 LLM 호출 '전', 게이트/검증은 LLM 호출 '후'에 적용된다.
 
-주의: 이 모듈은 결제/인증 요소를 차단하지 않는다. 결제 버튼까지 에이전트가
-직접 클릭해 예매를 완결하는 것이 제품 목표이므로, 민감 요소는 '탐지 후 로깅'만
+주의: 이 모듈은 전송/인증 요소를 차단하지 않는다. 전송 버튼까지 에이전트가
+직접 클릭해 작업을 완결하는 것이 제품 목표이므로, 민감 요소는 '탐지 후 로깅'만
 하고 LLM 전달 목록에서 제외하지 않는다. 실행 자체를 막는 게이트는
 confidence 게이트(check_confidence)와 응답 검증(validate_*)뿐이다.
 """
@@ -23,10 +23,10 @@ _MASK = "****"
 def detect_sensitive_elements(
     elements: list[ElementDTO], sensitive_keywords: list[str]
 ) -> list[ElementDTO]:
-    """위험 키워드(결제/인증/삭제 등)가 매칭되는 element를 '탐지'한다.
+    """위험 키워드(전송/인증/삭제 등)가 매칭되는 element를 '탐지'한다.
 
     반환값은 로깅·관측용이며 호출부는 이 결과로 elements를 걸러내지 않는다.
-    결제 단계 도달 여부를 서버 로그에서 추적하기 위한 신호로만 쓴다.
+    전송 단계 도달 여부를 서버 로그에서 추적하기 위한 신호로만 쓴다.
     """
     detected: list[ElementDTO] = []
     for element in elements:
@@ -66,7 +66,7 @@ def _mask_value(value: str | None) -> str | None:
 def check_confidence(response: DecideResponse, threshold: float) -> DecideResponse:
     """confidence가 threshold 미만이면 status를 ASK_USER로 강제 override한다.
 
-    확신 없는 조작은 실행하지 않고 사용자에게 되묻는다. 결제 화면인지 여부와
+    확신 없는 조작은 실행하지 않고 사용자에게 되묻는다. 전송 화면인지 여부와
     무관하게 동일한 임계값이 적용된다.
     """
     if response.confidence >= threshold:
