@@ -225,14 +225,25 @@ class TestAccessibilityService : AccessibilityService() {
         startActivity(launchIntent)
     }
 
-    /** "종료하기" 버튼: 자동화를 멈추고 오버레이를 없앤 뒤 접근성 서비스 자체를 끈다.
-     * 다시 쓰려면 설정(또는 adb)에서 접근성 서비스를 다시 켜야 한다. */
+    /** "종료하기" 버튼: 자동화를 멈추고 조용히 대기 상태로 돌아간다.
+     *
+     * **주의: `disableSelf()`를 쓰면 안 된다.** 예전엔 여기서 접근성 서비스 자체를 껐는데,
+     * `disableSelf()`는 앱 하나만 끄는 게 아니라 OS 접근성 프레임워크에서 이 서비스를 시스템
+     * 레벨로 비활성화한다(`dumpsys accessibility`의 "Enabled services" 목록에서 빠짐). 앱을
+     * 재실행해도 코드로 다시 켤 방법이 없고 설정에서 사람이 수동으로 다시 켜야만 해서, "종료하기"를
+     * 누른 뒤 앱을 재실행해 새로 말을 걸어도 접근성 이벤트 자체가 안 들어와 아무 반응이 없는
+     * 버그로 이어졌다(2026-08-26 보고). 그냥 세션을 정리하고 다음 웨이크 트리거
+     * ([WakeAndLaunchActivity])를 기다리는 것으로 충분하다 — 서비스는 계속 켜둔다.
+     */
     private fun exitApp() {
         stopSessionCore()
-        Log.i(TAG, "사용자 요청으로 앱 종료 (disableSelf)")
-        voice.speak("앱을 종료합니다.") {
+        Log.i(TAG, "사용자 요청으로 세션 종료 (서비스는 유지, 다음 웨이크 트리거 대기)")
+        voice.speak("종료할게요.") {
+            // endSession()은 오버레이를 문구만 바꿔 계속 띄워두므로("완료 후에도 버튼이 남아있게"가
+            // 목적) 여기서 쓰면 버튼이 안 사라진다. "종료하기"는 눈에 보이는 화면 자체를 없애는
+            // 것까지가 사용자 기대이므로 overlay.hide()로 완전히 제거한다. 서비스/접근성 이벤트
+            // 수신은 계속되므로 다음 웨이크 트리거가 오면 showOrUpdate가 오버레이를 다시 만든다.
             overlay.hide()
-            disableSelf()
         }
     }
 
