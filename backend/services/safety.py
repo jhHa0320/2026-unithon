@@ -63,23 +63,32 @@ def _mask_value(value: str | None) -> str | None:
     return masked
 
 
+_FALLBACK_QUESTION = "어떻게 해야 할지 확실하지 않아요. 다시 알려주시겠어요?"
+
+
 def check_confidence(response: DecideResponse, threshold: float) -> DecideResponse:
     """confidence가 threshold 미만이면 status를 ASK_USER로 강제 override한다.
 
     확신 없는 조작은 실행하지 않고 사용자에게 되묻는다. 전송 화면인지 여부와
     무관하게 동일한 임계값이 적용된다.
+
+    **문구도 반드시 질문으로 바꾼다.** 예전에는 voice_message가 비어 있을 때만 대체했는데,
+    LLM이 CONTINUE로 판단하며 "사진첩을 열게요" 같은 평서문을 써 둔 응답이 여기서 ASK_USER로
+    강등되면 — 사용자는 안내 문장을 듣고 앱은 답변을 기다리는 엇갈림이 생긴다. 사용자는
+    무엇을 답해야 할지 알 수 없어 그대로 멈춘다. 단, LLM이 이미 ASK_USER로 되묻고 있었다면
+    그 질문이 화면 맥락("김엄마 님과 엄마♥ 님 중...")을 담고 있으므로 그대로 살린다.
     """
     if response.confidence >= threshold:
         return response
 
+    llm_already_asked = response.status == "ASK_USER" and response.voice_message.strip()
     return response.model_copy(
         update={
             "target_node_id": None,
             "action_type": None,
             "input_value": None,
             "status": "ASK_USER",
-            "voice_message": response.voice_message
-            or "어떻게 해야 할지 확실하지 않아요. 다시 알려주시겠어요?",
+            "voice_message": response.voice_message if llm_already_asked else _FALLBACK_QUESTION,
             "reason": f"confidence {response.confidence:.2f} below threshold {threshold:.2f}",
         }
     )
@@ -106,9 +115,12 @@ def validate_action(response: DecideResponse) -> DecideResponse:
     """action_type과 나머지 필드의 정합성을 검증한다.
 
     - 조작 대상이 있으면 action_type이 반드시 있어야 클라이언트가 실행할 수 있다.
+    - 반대로 action_type만 있고 대상이 없어도 실행할 수 없다(무엇을 누르거나 스크롤할지 모름).
     - SET_TEXT인데 input_value가 없으면 클라이언트가 무엇을 입력할지 알 수 없다.
     """
     if response.target_node_id is None:
+        if response.action_type is not None:
+            return _to_unsupported(response, "action_type given without target_node_id")
         return response
 
     if response.action_type is None:
@@ -129,5 +141,7 @@ def _to_unsupported(response: DecideResponse, reason: str) -> DecideResponse:
             "status": "UNSUPPORTED",
             "voice_message": "죄송해요, 이 화면에서는 어떻게 해야 할지 모르겠어요.",
             "reason": reason,
+            # 응답 자체가 틀린 경우라 같은 화면으로 다시 물어도 결과가 같다 — 재시도 대상 아님.
+            "retryable": False,
         }
     )

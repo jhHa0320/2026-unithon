@@ -26,6 +26,10 @@ logger = get_logger(__name__)
 # 실측 응답은 2초대이므로 이 값은 예산이 아니라 안전망이다.
 AI_CLIENT_TIMEOUT_SECONDS = 12.0
 
+# history에 남길 status. 되묻기(ASK_USER)와 실패(UNSUPPORTED)는 화면을 진행시키지 않았으므로
+# "무엇을 했는지"의 기록이 아니다. 자세한 이유는 세션 갱신 지점(아래) 주석 참고.
+_HISTORY_WORTHY_STATUSES = frozenset({"CONTINUE", "DONE"})
+
 
 @lru_cache(maxsize=1)
 def _build_ai_client(
@@ -103,6 +107,8 @@ async def decide(
             confidence=0.0,
             status="UNSUPPORTED",
             reason="AI 응답 지연",
+            # 일시적 지연이므로 같은 화면으로 다시 시도하면 성공할 수 있다.
+            retryable=True,
         )
     except AIClientError as exc:
         # LLM 호출/파싱 실패. 서버가 죽지 않고 계약대로 응답한다(CLAUDE.md 12장).
@@ -117,6 +123,8 @@ async def decide(
             confidence=0.0,
             status="UNSUPPORTED",
             reason="AI 호출 실패",
+            # 429(무료 티어 소진)나 순간적인 5xx가 대부분이라 재시도 가치가 있다.
+            retryable=True,
         )
     else:
         # 6. confidence 게이트 — 임계값 미만이면 ASK_USER로 강제 override
@@ -142,11 +150,16 @@ async def decide(
             "has_user_speech": request.user_speech is not None,
             "prompt_version": prompt.PROMPT_VERSION,
             "latency_ms": latency_ms,
+            "retryable": response.retryable,
         },
     )
 
-    # 9. 세션 갱신 — 이번 step 결과를 history에 추가, 최근 N개만 유지
-    session_manager.update_history(request.session_id, _history_summary(response))
+    # 9. 세션 갱신 — 화면을 실제로 진행시킨 스텝만 history에 남긴다.
+    #    ASK_USER/UNSUPPORTED까지 전부 넣으면 되묻기가 3~4번 연속될 때 "전송 버튼을 눌렀다"는
+    #    진짜 근거가 MAX_HISTORY 창 밖으로 밀려난다 — 프롬프트 v3의 6번 규칙(중복 전송 방지)이
+    #    바로 그 기록을 보고 완료를 판단하므로, 밀려나면 이미 보낸 사진을 다시 보내는 사고가 난다.
+    if response.status in _HISTORY_WORTHY_STATUSES:
+        session_manager.update_history(request.session_id, _history_summary(response))
 
     # 10. 응답 반환
     return response

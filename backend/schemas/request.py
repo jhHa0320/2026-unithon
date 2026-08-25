@@ -9,6 +9,15 @@ class ElementDTO(BaseModel):
     content_description: str | None = None
     class_name: str
     clickable: bool
+    # 이 노드가 스크롤 가능한 컨테이너인지(RecyclerView/ScrollView 등). 목표 항목이 화면 밖에
+    # 있을 때 LLM이 무엇을 스크롤해야 할지 고르는 근거다. 이 필드를 안 보내는 구버전
+    # 클라이언트도 그대로 동작하도록 기본값을 둔다.
+    scrollable: bool = False
+    # 안드로이드 resource-id(viewIdResourceName, 예: "com.kakao.talk:id/btn_send").
+    # 라벨이 없거나 애매한 버튼을 LLM이 식별하는 데 가장 강한 신호다 — 아이콘만 있는
+    # 전송/첨부 버튼은 text도 contentDescription도 비어 있는 경우가 많다.
+    # 없는 노드도 많으므로 선택 필드.
+    view_id: str | None = None
     bounds: list[int]  # [left, top, right, bottom]
 
     @field_validator("bounds")

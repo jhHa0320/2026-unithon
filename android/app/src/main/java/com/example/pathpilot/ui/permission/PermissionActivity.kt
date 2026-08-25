@@ -13,6 +13,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.example.pathpilot.R
+import com.example.pathpilot.accessibility.AccessibilityStatus
 
 /**
  * 앱 실행에 필요한 세 가지 권한(Accessibility, Microphone, Overlay)을 순서대로 안내/요청한다.
@@ -25,13 +26,6 @@ import com.example.pathpilot.R
  * 채워 넣어야 한다 — 그 전까지는 "접근성 설정 화면 진입 여부"만으로 안내한다.
  */
 class PermissionActivity : AppCompatActivity() {
-
-    /**
-     * 지금은 멤버 A의 테스트용 서비스(testkit/TestAccessibilityService)를 가리킨다.
-     * 멤버 C가 정식 AccessibilityService를 추가하면 이 값을 그 서비스의 FQCN으로 바꾼다.
-     */
-    private val accessibilityServiceComponent: String? =
-        "com.example.pathpilot/com.example.pathpilot.testkit.TestAccessibilityService"
 
     private lateinit var accessibilityStatusText: TextView
     private lateinit var microphoneStatusText: TextView
@@ -76,10 +70,15 @@ class PermissionActivity : AppCompatActivity() {
     }
 
     private fun refreshStatus() {
-        accessibilityStatusText.text = if (isAccessibilityServiceEnabled()) {
-            "접근성 서비스: 켜짐"
-        } else {
-            "접근성 서비스: 꺼짐 — 설정에서 PathPilot을 켜주세요"
+        // "설정에서 켰는가"와 "실제로 살아 있는가"를 나눠서 보여준다. 둘을 뭉뚱그리면 서비스가
+        // 죽었는데 "켜짐"으로 표시되어(설정 목록에는 남아 있으므로) 원인을 알 수 없게 된다.
+        accessibilityStatusText.text = when (AccessibilityStatus.current(this)) {
+            AccessibilityStatus.State.RUNNING -> "접근성 서비스: 켜짐"
+            AccessibilityStatus.State.ENABLED_BUT_DEAD ->
+                "접근성 서비스: 응답 없음 — 설정에서 PathPilot을 껐다가 다시 켜주세요"
+            AccessibilityStatus.State.TURNED_OFF_UNEXPECTEDLY ->
+                "접근성 서비스: 꺼져 있습니다 — 앱이 멈추면서 해제된 것 같아요. 설정에서 다시 켜주세요"
+            AccessibilityStatus.State.NEVER_ENABLED -> "접근성 서비스: 꺼짐 — 설정에서 PathPilot을 켜주세요"
         }
 
         val micGranted = ContextCompat.checkSelfPermission(
@@ -95,12 +94,4 @@ class PermissionActivity : AppCompatActivity() {
         }
     }
 
-    private fun isAccessibilityServiceEnabled(): Boolean {
-        val target = accessibilityServiceComponent ?: return false
-        val enabledServices = Settings.Secure.getString(
-            contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
-        ) ?: return false
-        return enabledServices.contains(target)
-    }
 }

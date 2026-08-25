@@ -28,8 +28,11 @@ class LLMDecision(BaseModel):
             f"조작할 것이 없으면 {NO_TARGET_NODE_ID}."
         )
     )
-    action_type: Literal["CLICK", "SET_TEXT", "NONE"] = Field(
-        description="CLICK=탭, SET_TEXT=텍스트 입력, NONE=조작 없음"
+    action_type: Literal["CLICK", "SET_TEXT", "SCROLL", "NONE"] = Field(
+        description=(
+            "CLICK=탭, SET_TEXT=텍스트 입력, "
+            "SCROLL=목록을 한 화면 아래로 내림(목표 항목이 화면 밖에 있을 때), NONE=조작 없음"
+        )
     )
     input_value: str = Field(
         description="action_type이 SET_TEXT일 때 입력할 문자열. 그 외에는 빈 문자열."

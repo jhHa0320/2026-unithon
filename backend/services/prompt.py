@@ -17,7 +17,13 @@ from backend.schemas.request import ElementDTO, HistoryEntry
 #     요약 자체가 의미 없는 값(node id)이었던 게 원인이라 그 부분은 decide.py에서 고쳤지만,
 #     의미 있는 문장을 넣어줘도 LLM이 그걸로 완료 판단을 하라는 규칙이 없으면 안 쓴다는 걸
 #     확인해서(재현 테스트) 6번 규칙에 "history 확인" 지시를 명시적으로 추가했다.
-PROMPT_VERSION = "v3"
+# v4: SCROLL 액션을 추가했다. 그 전에는 목표 항목이 화면 밖에 있으면(친구 목록 아래쪽의
+#     수신자, 스크롤해야 나오는 열차 편) 도달할 방법이 아예 없어서, LLM이 화면에 보이는
+#     엉뚱한 항목을 고르거나 같은 화면을 반복 판단하며 제자리걸음했다. elements에
+#     scrollable 플래그가 함께 실린다.
+# v5: elements에 resource-id(vid)를 싣고 "elements 읽는 법" 절을 추가했다. 카카오톡의 전송·첨부
+#     버튼처럼 아이콘만 있어 text/desc가 모두 비는 노드를 LLM이 식별할 근거가 없었다.
+PROMPT_VERSION = "v5"
 
 SYSTEM_INSTRUCTION = """\
 당신은 Android 화면을 대신 조작해 주는 접근성 도우미입니다.
@@ -27,6 +33,13 @@ SYSTEM_INSTRUCTION = """\
 현재 화면의 요소 목록(elements)과 사용자의 목표(goal)를 보고,
 **다음에 조작할 요소 딱 하나**를 고릅니다. 전체 계획을 세우지 마세요.
 한 번에 한 단계만 판단하면 오류가 퍼지지 않습니다.
+
+## elements 읽는 법
+- `text` / `desc`: 화면에 보이는 글자와 접근성 라벨
+- `vid`: 안드로이드 resource-id (예: `btn_send`, `iv_attach`). **글자가 없는 아이콘 버튼을
+  알아보는 가장 확실한 단서입니다.** 라벨이 비어 있어도 vid가 목적을 말해주는 경우가 많습니다
+- `bounds`: `[left, top, right, bottom]` 화면 좌표
+- `clickable`이 false면 조작할 수 없고, `scrollable`이 true면 스크롤할 수 있는 목록입니다
 
 ## 반드시 지킬 규칙
 
@@ -50,6 +63,12 @@ SYSTEM_INSTRUCTION = """\
    바로 status를 "DONE"으로 하세요. 전송류 버튼은 한 목표당 한 번만 누릅니다.
 7. **confidence는 보수적으로** 매기세요. 비슷한 후보가 여럿이거나 화면을
    확신할 수 없으면 낮춥니다. 되돌릴 수 없는 동작이 실행되므로 과신이 곧 피해입니다.
+8. **찾는 항목이 화면에 없으면 스크롤하세요.** goal이 가리키는 항목(연락처, 열차 편,
+   사진 등)이 지금 elements에 보이지 않고, `scrollable: true`인 목록이 화면에 있다면
+   그 목록의 id를 target_node_id로 하고 action_type을 "SCROLL"로 하세요.
+   목록 아래쪽에 가려져 있을 뿐일 수 있습니다. **화면에 보이는 것 중 아무거나 대신
+   고르지 마세요** — 엉뚱한 대상에게 전송되는 사고로 이어집니다.
+   단, 이미 여러 번 스크롤했는데도(history 확인) 안 나오면 ASK_USER로 되물으세요.
 
 ## voice_message 작성법
 - 고령자가 듣고 바로 이해할 한국어 한 문장
@@ -61,6 +80,8 @@ SYSTEM_INSTRUCTION = """\
 ## 출력 규칙
 - 조작할 것이 없으면 target_node_id는 -1, action_type은 "NONE", input_value는 ""
 - action_type이 "SET_TEXT"이면 input_value를 반드시 채웁니다
+- action_type이 "SCROLL"이면 target_node_id는 `scrollable: true`인 노드여야 하고
+  input_value는 ""입니다. status는 "CONTINUE"입니다
 - reasoning은 로그용 한 문장입니다. 사용자에게 읽어주지 않습니다\
 """
 
@@ -98,6 +119,13 @@ def _serialize_element(element: ElementDTO) -> dict[str, object]:
         "clickable": element.clickable,
         "bounds": element.bounds,
     }
+    # 스크롤 가능한 노드는 소수라 True일 때만 싣는다(노드당 토큰 절약).
+    if element.scrollable:
+        data["scrollable"] = True
+    if element.view_id:
+        # "com.kakao.talk:id/btn_send" -> "btn_send". 패키지 접두어는 화면의 모든 노드에서
+        # 똑같이 반복되므로 정보량 없이 토큰만 먹는다. 뒷부분이 실제 식별자다.
+        data["vid"] = element.view_id.rsplit("/", 1)[-1]
     if element.text:
         data["text"] = element.text
     if element.content_description:

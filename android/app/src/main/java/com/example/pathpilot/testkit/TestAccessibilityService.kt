@@ -1,7 +1,9 @@
 package com.example.pathpilot.testkit
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.content.Intent
+import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
@@ -10,6 +12,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.example.pathpilot.accessibility.AccessibilityStatus
 import com.example.pathpilot.model.ActionType
 import com.example.pathpilot.model.DecideRequest
 import com.example.pathpilot.model.DecideResponse
@@ -17,6 +20,8 @@ import com.example.pathpilot.model.DecideStatus
 import com.example.pathpilot.model.ElementDTO
 import com.example.pathpilot.network.RetrofitClient
 import com.example.pathpilot.overlay.StatusOverlayManager
+import com.example.pathpilot.voice.SpeechCommands
+import com.example.pathpilot.voice.SpeechCommands.AnswerType
 import com.example.pathpilot.voice.VoiceInteractionManager
 import com.example.pathpilot.wakeup.WakeAndLaunchActivity
 import kotlinx.coroutines.CoroutineScope
@@ -70,11 +75,47 @@ class TestAccessibilityService : AccessibilityService() {
     private val analyzingIndicatorHandler = Handler(Looper.getMainLooper())
     private var pendingAnalyzingIndicator: Runnable? = null
 
+    /** "마지막 진행 후 아무 일도 안 일어남"을 감지해 스스로 복구하는 워치독. [armWatchdog] 참고. */
+    private val watchdogHandler = Handler(Looper.getMainLooper())
+    private var pendingWatchdog: Runnable? = null
+    private var watchdogRetries = 0
+
     private var sessionId: String = UUID.randomUUID().toString()
     private var goal: String = DEFAULT_GOAL
+    /** 세션이 살아 있는지. 값이 바뀔 때마다 [isAutomationRunning]에 그대로 반영한다 —
+     * MainActivity의 웨이크 루프가 이 값을 보고 마이크를 건드리지 않는다(경합 방지). */
     private var isSessionActive = false
+        set(value) {
+            field = value
+            isAutomationRunning = value
+        }
+
     private var isRequestInFlight = false
     private var consecutiveAskUserCount = 0
+
+    /** 요청이 날아가 있는 동안 들어온 화면 변경을 기억해 두는 플래그. 예전엔 그냥 버렸는데,
+     * 버려진 그 스캔이 마지막 이벤트였으면 이후 아무 일도 일어나지 않아 세션이 그대로 멈췄다. */
+    private var pendingRescan = false
+
+    /**
+     * 이 시각([SystemClock.uptimeMillis] 기준)까지는 화면이 아직 정착 중으로 보고 **스캔하지 않는다.**
+     *
+     * 클릭 직후에는 화면 전환 애니메이션이 돌아가는데, 그 사이 화면은 이전 화면과 새 화면이 섞인
+     * 중간 상태다. 그걸 읽어서 LLM에 보내면 "화면을 제대로 보지도 않고 다음 동작을 실행하는"
+     * 결과가 된다. 예전에는 이 개념 자체가 없어서, 디바운스가 [MAX_BURST_WAIT_MS] 상한에 걸리면
+     * 애니메이션 한복판에서도 강제로 스캔이 나갔다.
+     */
+    private var settleUntil = 0L
+
+    /**
+     * 직전에 서버로 보낸 화면의 지문. 같은 화면을 두 번 판단해 **같은 곳을 또 누르는 것**을 막는다.
+     *
+     * 화면 전환이 끝나고 정적이 되면 접근성 이벤트가 더 오지 않는다. 그러면 워치독이 재스캔하는데,
+     * 화면이 그대로이므로 LLM도 같은 판단을 내리고 같은 버튼이 한 번 더 눌린다 — 전송처럼
+     * 되돌릴 수 없는 동작에서는 그대로 사고다. 사용자 답변이 새로 들어왔거나 goal이 바뀐
+     * 경우에는 화면이 같아도 다시 물어야 하므로, 그때는 이 값을 null로 지워 강제로 재판단시킨다.
+     */
+    private var lastScreenFingerprint: Int? = null
 
     /** 세션 세대 번호. 중단/새 세션마다 올라가고, 서버 응답이 도착했을 때 이 값이 요청 시점과
      * 다르면(= 그 사이 사용자가 중단했거나 세션이 바뀌었으면) 응답을 버린다 — 중단을 눌렀는데
@@ -83,28 +124,63 @@ class TestAccessibilityService : AccessibilityService() {
 
     /** 지금 세션이 진행 중인 앱. [TARGET_PACKAGES] 중 하나이며, 실제로 이벤트가 들어온 값으로
      * 채워진다 — 하드코딩된 단일 상수가 아니라 "지금 어느 앱 화면인지"를 그대로 반영한다. */
-    private var currentPackage: String = TARGET_PACKAGES.first()
+    private var currentPackage: String = PRIMARY_PACKAGES.first()
 
     /** "무엇을 도와드릴까요?" 답변을 기다리는 동안, 그 사이 들어오는 화면 변경 이벤트가 아직
      * 정해지지 않은 goal로 collectAndDecide를 먼저 실행해버리지 않도록 막는 가드. */
     private var isAwaitingGoal = false
 
-    /** ASK_USER 답변의 종류. CLAUDE.md §5-1 참고: 정보 제공형은 goal에 누적, 확인 응답은 user_speech로 일회성 전달. */
-    private enum class AnswerType { INFO, CONFIRMATION }
+    // ASK_USER 답변의 종류(AnswerType)는 SpeechCommands에 있다. CLAUDE.md §5-1 참고:
+    // 정보 제공형은 goal에 누적, 확인 응답은 user_speech로 일회성 전달.
 
     /** 이번 스텝에서 화면을 훑을 때 부여한 id -> 실제 노드. §알려진 한계 참고. */
     private val nodeMap = mutableMapOf<Int, AccessibilityNodeInfo>()
 
+    /**
+     * **여기서 예외가 새어나가면 시스템이 이 서비스를 죽이고 `Crashed services`로 표시한다.**
+     * 그 뒤가 고약하다 — 설정 화면에는 여전히 "켜짐"으로 보이는데 실제로는 접근성 이벤트가
+     * 하나도 안 들어오고 오버레이 창도 함께 사라진다. 사용자 눈에는 "버튼이 없어지고 아무것도
+     * 안 되는" 상태이고, 원인을 짐작할 단서가 화면에 하나도 없다(2026-08-26 실기기 확인).
+     * 그래서 초기화 실패를 예외로 터뜨리지 않고 로그로만 남긴다.
+     */
     override fun onServiceConnected() {
         super.onServiceConnected()
-        voice = VoiceInteractionManager(this)
-        overlay = StatusOverlayManager(this)
-        overlay.onStopClicked = { stopAndListenForNewRequest() }
-        overlay.onExitClicked = { exitApp() }
+        val initialized = runCatching {
+            voice = VoiceInteractionManager(this)
+            overlay = StatusOverlayManager(this)
+            overlay.onStopClicked = { stopAndListenForNewRequest() }
+            overlay.onExitClicked = { exitApp() }
+        }
+        if (initialized.isFailure) {
+            Log.e(TAG, "서비스 초기화 실패 — 이벤트를 받지 않는다", initialized.exceptionOrNull())
+            return
+        }
+        isServiceConnected = true
+        // "이 기기에서 한 번은 정상으로 켜졌다"를 남긴다. 나중에 서비스가 죽어 시스템이 접근성
+        // 목록에서 우리를 지워버렸을 때, 안내 화면이 "안 켜셨습니다"가 아니라 "켜져 있었는데
+        // 풀렸습니다"라고 정확히 말할 수 있게 하는 근거다.
+        AccessibilityStatus.rememberEnabled(this)
         Log.i(TAG, "TestAccessibilityService connected (targets=$TARGET_PACKAGES)")
     }
 
+    override fun onUnbind(intent: Intent?): Boolean {
+        isServiceConnected = false
+        Log.i(TAG, "TestAccessibilityService unbound")
+        return super.onUnbind(intent)
+    }
+
+    /**
+     * 이벤트 처리 중 터진 예외가 밖으로 나가면 서비스 전체가 죽는다([onServiceConnected] 주석 참고).
+     * 화면 구조는 앱마다 제각각이고 노드는 언제든 무효화되므로, 한 이벤트의 실패가 세션 전체를
+     * 끝내지 않도록 여기서 막는다.
+     */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (!isServiceConnected) return
+        runCatching { handleAccessibilityEvent(event) }
+            .onFailure { Log.e(TAG, "이벤트 처리 중 예외 — 이번 이벤트만 건너뛴다", it) }
+    }
+
+    private fun handleAccessibilityEvent(event: AccessibilityEvent?) {
         val eventPackage = event?.packageName?.toString()
         if (eventPackage == null || eventPackage !in TARGET_PACKAGES) {
             if (isAwaitingGoal) {
@@ -117,23 +193,30 @@ class TestAccessibilityService : AccessibilityService() {
 
         Log.d(TAG, "a11y 이벤트: type=${AccessibilityEvent.eventTypeToString(event?.eventType ?: 0)} source=${event?.className} package=$eventPackage")
 
-        // 지원 앱 목록 안에서 다른 앱으로 바뀐 경우(예: 카카오톡 -> 카카오택시)도 새 세션으로
-        // 취급한다 — 이전 세션의 goal/이력이 엉뚱한 앱에 이어붙는 걸 막는다.
-        val packageChanged = eventPackage != currentPackage
+        // 주 앱(카카오톡/카카오택시/코레일톡)끼리 바뀐 경우만 새 세션으로 취급한다 — 이전 세션의
+        // goal/이력이 엉뚱한 앱에 이어붙는 걸 막는다. 사진 선택기 같은 보조 화면([AUXILIARY_PACKAGES])
+        // 으로 넘어간 것은 같은 목표를 수행하는 도중이므로 세션을 그대로 이어간다.
+        val primaryAppChanged =
+            eventPackage in PRIMARY_PACKAGES && currentPackage != eventPackage &&
+                currentPackage in PRIMARY_PACKAGES
         currentPackage = eventPackage
 
-        if (!isSessionActive) {
-            // 세션이 없을 때는 웨이크 흐름([sessionRequested])이 명시적으로 요청한 경우에만 새로
-            // 시작한다. 예전엔 대상 앱 화면이기만 하면 무조건 세션을 열어서, 완료/중단 후에도
-            // 사용자가 앱을 계속 쓰는 동안 "무엇을 도와드릴까요?"를 반복해 묻고 마이크를 계속
-            // 열어뒀다(2026-08-26 보고: "계속 사용자 입력을 대기하는 것 같다").
-            if (!sessionRequested) return
+        // 웨이크 신호는 세션 진행 여부와 무관하게 항상 여기서 소비한다. 예전엔 !isSessionActive일
+        // 때만 소비해서, 세션이 살아 있는 동안 웨이크가 또 걸리면 플래그가 true인 채로 남았다가
+        // 세션이 끝난 뒤 아무 이벤트에서나 의도치 않은 새 세션이 열렸다.
+        if (sessionRequested) {
             sessionRequested = false
             beginNewSession()
             return
         }
 
-        if (packageChanged) {
+        // 세션이 없을 때는 웨이크 흐름([sessionRequested])이 명시적으로 요청한 경우에만 새로
+        // 시작한다. 예전엔 대상 앱 화면이기만 하면 무조건 세션을 열어서, 완료/중단 후에도
+        // 사용자가 앱을 계속 쓰는 동안 "무엇을 도와드릴까요?"를 반복해 묻고 마이크를 계속
+        // 열어뒀다(2026-08-26 보고: "계속 사용자 입력을 대기하는 것 같다").
+        if (!isSessionActive) return
+
+        if (primaryAppChanged) {
             beginNewSession()
             return
         }
@@ -143,11 +226,40 @@ class TestAccessibilityService : AccessibilityService() {
     }
 
     private fun beginNewSession() {
-        isSessionActive = true
+        // 이전 세션의 잔여 타이머·음성 콜백을 먼저 확실히 끊는다. epoch를 올린 뒤 정리해야
+        // 정리 과정에서 살아남은 콜백들도 새 epoch와 비교돼 무시된다.
         sessionEpoch++
+        resetTransientState()
+        isSessionActive = true
+        isAwaitingGoal = false
         sessionId = UUID.randomUUID().toString()
         consecutiveAskUserCount = 0
+        watchdogRetries = 0
         startSessionAndCaptureGoal()
+    }
+
+    /**
+     * 예약된 화면 스캔·워치독·스피너·마이크·TTS를 전부 멈춘다. **[pendingGoal]과
+     * [isSessionActive]는 건드리지 않는다** — 세션을 끝낼 때([stopSessionCore])와 새로 시작할
+     * 때([beginNewSession]) 모두 쓰는 공통 정리라서, 그 둘의 의미가 정반대인 필드는 호출부가 정한다.
+     */
+    private fun resetTransientState() {
+        pendingCollect?.let { debounceHandler.removeCallbacks(it) }
+        pendingCollect = null
+        firstEventInBurstAt = null
+        pendingRescan = false
+        settleUntil = 0L
+        // 세션이 바뀌면 직전 화면과의 비교는 의미가 없다. 남겨두면 새 세션의 첫 스캔이
+        // "직전과 같은 화면"으로 오인돼 통째로 건너뛰어진다.
+        lastScreenFingerprint = null
+        disarmWatchdog()
+        cancelAnalyzingIndicator()
+        // nodeMap은 AccessibilityNodeInfo(= 시스템과의 IPC 핸들)를 화면 하나당 수백 개까지
+        // 들고 있다. 세션이 끝났는데 계속 붙들고 있을 이유가 없다.
+        nodeMap.clear()
+        // stopListening()+stopSpeaking()이 아니라 cancelAll()이어야 한다 — 이미 엔진에 등록돼
+        // 취소할 수 없는 TTS/STT 콜백까지 무효화해야 중단 후 마이크가 되살아나지 않는다.
+        voice.cancelAll()
     }
 
     /**
@@ -162,12 +274,7 @@ class TestAccessibilityService : AccessibilityService() {
         sessionRequested = false
         pendingGoal = null
         consecutiveAskUserCount = 0
-        pendingCollect?.let { debounceHandler.removeCallbacks(it) }
-        pendingCollect = null
-        firstEventInBurstAt = null
-        cancelAnalyzingIndicator()
-        voice.stopListening()
-        voice.stopSpeaking()
+        resetTransientState()
     }
 
     /**
@@ -186,9 +293,11 @@ class TestAccessibilityService : AccessibilityService() {
             return
         }
         overlay.showOrUpdate("무엇을 도와드릴까요?")
+        val epoch = sessionEpoch
         voice.askAndListen(
             question = if (attempt == 0) "네, 멈췄어요. 무엇을 도와드릴까요?" else "무엇을 도와드릴까요?",
             onAnswer = { answer ->
+                if (isStaleEpoch(epoch)) return@askAndListen
                 if (isStopCommand(answer)) {
                     voice.speak("알겠습니다.")
                     endSession("대기 중입니다. 필요하시면 중단하기 버튼을 눌러주세요.")
@@ -196,8 +305,23 @@ class TestAccessibilityService : AccessibilityService() {
                 }
                 startRequestedGoal(answer)
             },
-            onError = { listenForNewRequest(attempt + 1) },
+            onError = {
+                if (isStaleEpoch(epoch)) return@askAndListen
+                listenForNewRequest(attempt + 1)
+            },
         )
+    }
+
+    /**
+     * 이 콜백이 등록된 [epoch] 시점의 세션이 아직 유효한지. 음성 콜백(TTS 완료·STT 결과)은
+     * 사용자가 중단/종료를 누른 뒤에도 뒤늦게 도착할 수 있어서, 실행 전에 반드시 확인해야 한다.
+     * 확인 없이 진행하면 "중단했는데 클릭이 나가는" 사고가 난다 — 사진 전송처럼 되돌릴 수 없는
+     * 동작이 걸려 있으므로 이 검사는 선택이 아니다.
+     */
+    private fun isStaleEpoch(epoch: Int): Boolean {
+        if (epoch == sessionEpoch) return false
+        Log.i(TAG, "중단/세션 교체 후 도착한 음성 콜백 무시 (epoch $epoch != $sessionEpoch)")
+        return true
     }
 
     /**
@@ -251,7 +375,47 @@ class TestAccessibilityService : AccessibilityService() {
      * 사용자가 언제든 "중단하기"(새 요청)나 "종료하기"를 누를 수 있게. */
     private fun endSession(message: String) {
         isSessionActive = false
+        disarmWatchdog()
         overlay.showOrUpdate(message)
+    }
+
+    /**
+     * "동작을 실행했으니 화면이 곧 바뀔 것"이라는 기대에 시한을 건다. [WATCHDOG_TIMEOUT_MS] 안에
+     * 접근성 이벤트가 오지 않으면 스스로 한 번 더 스캔한다.
+     *
+     * 이 하나가 여러 정지 시나리오의 공통 안전망이다: 클릭이 조용히 실패했을 때, 화면 밖 노드를
+     * 눌러 아무 일도 안 일어났을 때, 응답은 왔는데 계약 밖 status라 처리하지 못했을 때 —
+     * 전부 "이벤트가 안 오니 다음 스캔도 예약되지 않아 영구 정지"로 끝나는 경로였다.
+     * 오버레이는 직전 문구인 채로 멈춰 있어서 관객 눈에는 앱이 죽은 것으로 보인다.
+     *
+     * 되묻는 중(ASK_USER)에는 걸지 않는다 — 사용자가 답을 고민하는 시간은 정지가 아니다.
+     */
+    private fun armWatchdog(delayMs: Long = WATCHDOG_TIMEOUT_MS) {
+        disarmWatchdog()
+        if (!isSessionActive) return
+        val epoch = sessionEpoch
+        val runnable = Runnable { onWatchdogFired(epoch) }
+        pendingWatchdog = runnable
+        watchdogHandler.postDelayed(runnable, delayMs)
+    }
+
+    private fun disarmWatchdog() {
+        pendingWatchdog?.let { watchdogHandler.removeCallbacks(it) }
+        pendingWatchdog = null
+    }
+
+    private fun onWatchdogFired(epoch: Int) {
+        pendingWatchdog = null
+        if (!isSessionActive || isStaleEpoch(epoch)) return
+        watchdogRetries++
+        if (watchdogRetries > MAX_WATCHDOG_RETRIES) {
+            Log.w(TAG, "워치독 재시도 한도 초과 — 세션 종료")
+            voice.speak("화면이 더 진행되지 않아요. 중단하기를 눌러 다시 말씀해 주세요.")
+            endSession("진행이 멈췄습니다. 중단하기를 눌러 다시 말씀해 주세요.")
+            return
+        }
+        Log.i(TAG, "워치독: 진행 없음 — 재스캔 (retry=$watchdogRetries)")
+        collectAndDecide(userSpeech = null)
     }
 
     /**
@@ -273,9 +437,11 @@ class TestAccessibilityService : AccessibilityService() {
 
         isAwaitingGoal = true
         overlay.showOrUpdate("무엇을 도와드릴까요?")
+        val epoch = sessionEpoch
         voice.askAndListen(
             question = "무엇을 도와드릴까요?",
             onAnswer = { answer ->
+                if (isStaleEpoch(epoch)) return@askAndListen
                 isAwaitingGoal = false
                 if (isStopCommand(answer)) {
                     stopSessionCore()
@@ -288,6 +454,7 @@ class TestAccessibilityService : AccessibilityService() {
                 scheduleCollectAndDecide()
             },
             onError = { err ->
+                if (isStaleEpoch(epoch)) return@askAndListen
                 isAwaitingGoal = false
                 Log.w(TAG, "목표 음성 인식 실패($err), 기본 목표로 대체")
                 goal = DEFAULT_GOAL
@@ -303,10 +470,14 @@ class TestAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        isServiceConnected = false
+        isAutomationRunning = false
         pendingCollect?.let { debounceHandler.removeCallbacks(it) }
         firstEventInBurstAt = null
+        disarmWatchdog()
         cancelAnalyzingIndicator()
         serviceScope.cancel()
+        nodeMap.clear()
         overlay.hide()
         voice.shutdown()
     }
@@ -321,6 +492,10 @@ class TestAccessibilityService : AccessibilityService() {
      * 들어오는 중이어도 강제로 한 번 실행한다.
      */
     private fun scheduleCollectAndDecide() {
+        // 화면이 실제로 바뀌었다는 뜻이므로 "진행이 멈췄다" 타이머를 해제하고 재시도 횟수도 되돌린다.
+        disarmWatchdog()
+        watchdogRetries = 0
+
         val now = SystemClock.uptimeMillis()
         val burstStart = firstEventInBurstAt ?: now.also { firstEventInBurstAt = it }
         val elapsedSinceBurstStart = now - burstStart
@@ -335,17 +510,56 @@ class TestAccessibilityService : AccessibilityService() {
         debounceHandler.postDelayed(runnable, delay)
     }
 
+    /** 화면을 훑는 동안 모아두는 후보. id는 최종 선별이 끝난 뒤에야 매긴다. */
+    private data class Candidate(
+        val node: AccessibilityNodeInfo,
+        val text: String?,
+        val description: String?,
+        val className: String,
+        val clickable: Boolean,
+        val scrollable: Boolean,
+        val viewId: String?,
+        val bounds: Rect,
+    )
+
     /** 현재 화면을 ElementDTO 목록으로 만들어 /decide를 호출한다. */
     private fun collectAndDecide(userSpeech: String?) {
-        if (isRequestInFlight) {
-            Log.d(TAG, "이전 요청 진행 중 — 이번 스캔은 건너뜀")
+        // 중단/종료 이후 뒤늦게 들어온 경로(뒤늦은 음성 콜백, 이미 예약된 타이머)로는 절대
+        // 요청을 보내지 않는다. 보내면 그 응답으로 클릭이 실행돼 "멈추라고 했는데 전송됨"이 된다.
+        if (!isSessionActive) {
+            Log.i(TAG, "세션이 활성 상태가 아님 — 스캔/요청 취소")
             return
         }
-        val root = rootInActiveWindow ?: return
+        // 액션 직후 화면이 아직 정착 중이면 그 시간이 지날 때까지 미룬다. 여기서 "무시"가 아니라
+        // "재예약"이어야 한다 — 그냥 버리면 이 스캔이 마지막 기회였을 때 세션이 그대로 멈춘다.
+        val settleRemaining = settleUntil - SystemClock.uptimeMillis()
+        if (settleRemaining > 0) {
+            Log.d(TAG, "화면 정착 대기 — ${settleRemaining}ms 후로 스캔을 미룸")
+            pendingCollect?.let { debounceHandler.removeCallbacks(it) }
+            val runnable = Runnable { collectAndDecide(userSpeech) }
+            pendingCollect = runnable
+            debounceHandler.postDelayed(runnable, settleRemaining)
+            return
+        }
 
-        nodeMap.clear()
-        val elements = mutableListOf<ElementDTO>()
-        var nextId = 1
+        if (isRequestInFlight) {
+            // 예전엔 그냥 버렸는데, 버려진 그 스캔이 마지막 이벤트였으면 이후 아무 일도
+            // 일어나지 않아 세션이 그대로 멈췄다. 기억해 뒀다가 응답이 끝나면 다시 돌린다.
+            Log.d(TAG, "이전 요청 진행 중 — 이번 스캔은 응답 후로 미룸")
+            pendingRescan = true
+            return
+        }
+        // 화면을 읽지 못했다. 그냥 return하면 다음 이벤트가 안 올 경우 세션이 조용히 멈추므로
+        // 워치독에 맡겨 다시 시도하게 한다.
+        val root = rootInActiveWindow
+        if (root == null) {
+            Log.w(TAG, "rootInActiveWindow가 null — 재시도 예약")
+            armWatchdog(RETRY_DELAY_MS)
+            return
+        }
+
+        val screen = Rect(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
+        val candidates = mutableListOf<Candidate>()
 
         fun visit(node: AccessibilityNodeInfo) {
             val text = node.text?.toString()
@@ -355,23 +569,20 @@ class TestAccessibilityService : AccessibilityService() {
             // 클릭한다(2026-08-26 코레일톡 실측) — 자손 텍스트를 모아 라벨을 합성한다.
             val description = node.contentDescription?.toString()
                 ?: if (node.isClickable && text.isNullOrBlank()) synthesizeLabel(node) else null
-            if (node.isClickable || !text.isNullOrBlank() || !description.isNullOrBlank()) {
+            if (node.isClickable || node.isScrollable || !text.isNullOrBlank() || !description.isNullOrBlank()) {
                 val bounds = Rect()
                 node.getBoundsInScreen(bounds)
-                // 아직 레이아웃이 안 잡힌 노드는 bounds가 [0,0,0,0] 등 폭/높이 0으로 나온다.
-                // 백엔드가 bounds 하나라도 잘못되면 요청 전체를 422로 거부하므로 여기서 미리 거른다.
-                val hasValidBounds = bounds.left < bounds.right && bounds.top < bounds.bottom
-                if (hasValidBounds) {
-                    val id = nextId++
-                    nodeMap[id] = node
-                    elements.add(
-                        ElementDTO(
-                            id = id,
+                if (isUsableBounds(bounds, screen) && node.isVisibleToUser) {
+                    candidates.add(
+                        Candidate(
+                            node = node,
                             text = text,
-                            content_description = description,
-                            class_name = node.className?.toString() ?: "unknown",
+                            description = description,
+                            className = node.className?.toString() ?: "unknown",
                             clickable = node.isClickable,
-                            bounds = listOf(bounds.left, bounds.top, bounds.right, bounds.bottom),
+                            scrollable = node.isScrollable,
+                            viewId = node.viewIdResourceName,
+                            bounds = bounds,
                         ),
                     )
                 }
@@ -382,7 +593,48 @@ class TestAccessibilityService : AccessibilityService() {
         }
         visit(root)
 
-        if (elements.isEmpty()) return
+        val selected = selectElements(candidates)
+        if (selected.isEmpty()) {
+            // 전환 도중이라 아직 아무것도 안 그려졌을 수 있다. 마찬가지로 재시도에 맡긴다.
+            Log.w(TAG, "보낼 요소가 없음 — 재시도 예약")
+            armWatchdog(RETRY_DELAY_MS)
+            return
+        }
+
+        nodeMap.clear()
+        val elements = selected.mapIndexed { index, candidate ->
+            val id = index + 1
+            nodeMap[id] = candidate.node
+            ElementDTO(
+                id = id,
+                text = candidate.text,
+                content_description = candidate.description,
+                class_name = candidate.className,
+                clickable = candidate.clickable,
+                scrollable = candidate.scrollable,
+                view_id = candidate.viewId,
+                bounds = listOf(
+                    candidate.bounds.left,
+                    candidate.bounds.top,
+                    candidate.bounds.right,
+                    candidate.bounds.bottom,
+                ),
+            )
+        }
+        Log.d(TAG, "화면 스캔: 후보 ${candidates.size}개 -> 전송 ${elements.size}개")
+
+        // 직전과 완전히 같은 화면이면 서버에 다시 묻지 않는다. 물어봐야 같은 답이 오고,
+        // 그 답대로 실행하면 방금 누른 곳을 한 번 더 누르게 된다. 사용자가 새로 답을 줬을
+        // 때(userSpeech)는 화면이 같아도 판단이 달라져야 하므로 그대로 진행한다.
+        val fingerprint = fingerprintOf(elements)
+        if (userSpeech == null && fingerprint == lastScreenFingerprint) {
+            Log.i(TAG, "화면이 직전과 동일 — 서버 호출 생략 (fingerprint=$fingerprint)")
+            // 진짜로 아무 진행이 없는 상황일 수 있으니 워치독에 맡긴다. 계속 같으면
+            // 재시도 한도에 걸려 사용자에게 알리고 끝난다.
+            armWatchdog()
+            return
+        }
+        lastScreenFingerprint = fingerprint
 
         isRequestInFlight = true
         scheduleAnalyzingIndicator()
@@ -409,13 +661,88 @@ class TestAccessibilityService : AccessibilityService() {
             } catch (e: Exception) {
                 Log.e(TAG, "decide 호출 실패", e)
                 if (requestEpoch == sessionEpoch) {
-                    overlay.showOrUpdate("서버 호출 실패: ${e.message}")
+                    // 예외 문자열(영문)을 그대로 띄우면 사용자는 무슨 일인지 알 수 없다.
+                    // 워치독이 곧 재시도하므로 "다시 해보는 중"이라고만 알린다.
+                    notifyAndRetry("연결이 잠시 끊겼어요. 다시 시도할게요.")
                 }
             } finally {
                 isRequestInFlight = false
                 cancelAnalyzingIndicator()
+                if (pendingRescan) {
+                    pendingRescan = false
+                    if (isSessionActive) scheduleCollectAndDecide()
+                }
             }
         }
+    }
+
+    /**
+     * 화면 한 장의 지문. 요소의 라벨·조작 가능 여부·위치가 하나라도 다르면 값이 달라진다.
+     *
+     * id는 스캔할 때마다 1부터 다시 매기는 임시 번호라 넣어도 의미가 없다 — 대신 **순서**가
+     * 반영되도록 이어붙인다. bounds를 포함하는 이유는 스크롤처럼 "항목은 그대로인데 위치만
+     * 밀린" 변화를 놓치지 않기 위해서다. 애니메이션 중의 미세한 좌표 변화 때문에 매번 값이
+     * 달라지는 문제는 [settleUntil] 대기가 먼저 막아준다.
+     */
+    private fun fingerprintOf(elements: List<ElementDTO>): Int = elements.joinToString("|") {
+        "${it.text}${it.content_description}${it.view_id}${it.clickable}${it.scrollable}${it.bounds}"
+    }.hashCode()
+
+    /**
+     * 이 노드를 LLM에 보낼 만한 위치에 있는지.
+     *
+     * 폭/높이가 0인 노드는 아직 레이아웃이 안 잡힌 것이고(백엔드가 bounds 정합성 위반으로 요청
+     * 전체를 422로 거부한다), **화면 밖으로 밀려난 노드는 눌러도 아무 일이 일어나지 않는다.**
+     * 스크롤로 밀려난 RecyclerView 항목은 bounds가 top=-800처럼 화면 밖인데도 폭·높이는
+     * 멀쩡해서 예전 검사(폭>0, 높이>0)를 그대로 통과했다 — LLM이 그걸 고르면 performAction은
+     * true를 돌려주는데 화면은 그대로여서, 이벤트가 안 오고 다음 스캔도 예약되지 않아
+     * 세션이 영구 정지했다.
+     */
+    private fun isUsableBounds(bounds: Rect, screen: Rect): Boolean {
+        if (bounds.left >= bounds.right || bounds.top >= bounds.bottom) return false
+        return Rect.intersects(bounds, screen)
+    }
+
+    /**
+     * 후보가 너무 많으면 [MAX_ELEMENTS]개로 줄인다. 카카오톡 대화방 목록 같은 화면은 노드가
+     * 수백 개라 그대로 보내면 Gemini 입력 토큰이 커져 실측 2.4초가 5~8초로 늘어난다.
+     *
+     * 줄이는 순서:
+     * 1. 부모/자식이 같은 라벨·같은 위치로 중복 보고하는 것을 합친다(clickable 쪽을 남긴다).
+     *    같은 이름의 서로 다른 연락처는 bounds가 다르므로 살아남는다 — 되묻기 판단의 근거라
+     *    이것까지 합치면 안 된다.
+     * 2. 그래도 넘치면 조작 가능한 노드(clickable/scrollable)를 우선 남긴다. 화면 순서는
+     *    유지한다 — LLM이 위치로 화면을 이해하기 때문.
+     */
+    private fun selectElements(candidates: List<Candidate>): List<Candidate> {
+        val deduped = mutableListOf<Candidate>()
+        val seen = mutableMapOf<String, Int>() // 라벨+위치 -> deduped 안의 인덱스
+        for (candidate in candidates) {
+            val label = "${candidate.text}|${candidate.description}"
+            if (label == "null|null") {
+                deduped.add(candidate)
+                continue
+            }
+            val key = "$label|${candidate.bounds.flattenToString()}"
+            val existingIndex = seen[key]
+            if (existingIndex == null) {
+                seen[key] = deduped.size
+                deduped.add(candidate)
+            } else if (candidate.clickable && !deduped[existingIndex].clickable) {
+                // 같은 라벨·같은 위치라면 실제로 누를 수 있는 쪽이 LLM에 쓸모 있다.
+                deduped[existingIndex] = candidate
+            }
+        }
+
+        if (deduped.size <= MAX_ELEMENTS) return deduped
+
+        val actionable = deduped.withIndex().filter { it.value.clickable || it.value.scrollable }
+        val rest = deduped.withIndex().filterNot { it.value.clickable || it.value.scrollable }
+        val kept = (actionable + rest.take((MAX_ELEMENTS - actionable.size).coerceAtLeast(0)))
+            .take(MAX_ELEMENTS)
+            .sortedBy { it.index }
+        Log.w(TAG, "요소 ${deduped.size}개 -> ${kept.size}개로 축약 (조작 가능 ${actionable.size}개 우선)")
+        return kept.map { it.value }
     }
 
     /**
@@ -428,8 +755,15 @@ class TestAccessibilityService : AccessibilityService() {
         val parts = mutableListOf<String>()
         fun walk(child: AccessibilityNodeInfo) {
             if (parts.size >= SYNTHESIZED_LABEL_MAX_PARTS) return
-            child.text?.toString()?.takeIf { it.isNotBlank() }?.let { parts.add(it.trim()) }
-            child.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { parts.add(it.trim()) }
+            // text와 contentDescription이 같은 값인 노드가 흔하다(둘 다 "전송"인 버튼 등).
+            // 예전엔 둘 다 넣어서 "전송 전송"이 되고, 조각 상한 3개를 절반이나 잡아먹어
+            // 정작 뒤에 오는 진짜 라벨이 잘렸다. 이미 담긴 조각은 다시 담지 않는다.
+            fun addPart(value: String?) {
+                val trimmed = value?.trim().orEmpty()
+                if (trimmed.isNotBlank() && trimmed !in parts) parts.add(trimmed)
+            }
+            addPart(child.text?.toString())
+            addPart(child.contentDescription?.toString())
             for (i in 0 until child.childCount) {
                 if (parts.size >= SYNTHESIZED_LABEL_MAX_PARTS) return
                 child.getChild(i)?.let { walk(it) }
@@ -473,6 +807,8 @@ class TestAccessibilityService : AccessibilityService() {
                     endSession("답변을 계속 이해하지 못해 중단합니다.")
                     return
                 }
+                // 사용자가 답을 고민하는 시간은 "정지"가 아니므로 워치독을 걸지 않는다.
+                disarmWatchdog()
                 overlay.showOrUpdate("답변 대기: ${response.voice_message}")
                 askUserWithRetry(response.voice_message, attempt = 0)
             }
@@ -487,10 +823,25 @@ class TestAccessibilityService : AccessibilityService() {
 
             DecideStatus.UNSUPPORTED -> {
                 consecutiveAskUserCount = 0
+                // 서버가 '일시적 실패'라고 표시한 UNSUPPORTED(AI 호출 실패/응답 지연)는 세션을
+                // 끝내지 않는다. 무료 티어 소진(429)이나 순간적인 5xx 하나로 세션이 끝나면
+                // 시연 도중 복구할 방법이 없다 — 같은 화면으로 잠시 후 다시 시도한다.
+                if (response.retryable) {
+                    Log.w(TAG, "일시적 서버 오류 — 재시도 예약 (reason=${response.reason})")
+                    notifyAndRetry("잠시 문제가 있었어요. 다시 시도할게요.")
+                    return
+                }
                 if (response.voice_message.isNotBlank()) {
                     voice.speak(response.voice_message)
                 }
                 endSession("중단됨: ${response.reason ?: response.voice_message}")
+            }
+
+            // status는 String이라 when이 exhaustive하지 않다. 계약 밖 값이나 (Gson이 알 수 없는
+            // 값을 null로 만들어) null이 들어오면 예전엔 아무 분기도 타지 않고 조용히 멈췄다.
+            else -> {
+                Log.e(TAG, "알 수 없는 status=${response.status} — 재스캔으로 복구 시도")
+                armWatchdog(RETRY_DELAY_MS)
             }
         }
     }
@@ -505,15 +856,18 @@ class TestAccessibilityService : AccessibilityService() {
             endSession("답변을 인식하지 못했습니다.")
             return
         }
+        val epoch = sessionEpoch
         voice.askAndListen(
             question = question,
             onAnswer = { answer ->
+                if (isStaleEpoch(epoch)) return@askAndListen
                 // 사용자가 방금 뭐라고 답했는지는 항상 화면에 보여야 한다 — 잘 알아들었는지
                 // 스스로 확인할 수 있게.
                 overlay.showOrUpdate("입력: $answer")
                 routeAnswer(answer)
             },
             onError = { err ->
+                if (isStaleEpoch(epoch)) return@askAndListen
                 overlay.showOrUpdate("답변 인식 실패($err), 다시 물어봅니다.")
                 askUserWithRetry(question, attempt + 1)
             },
@@ -531,34 +885,34 @@ class TestAccessibilityService : AccessibilityService() {
         when (classifyAnswer(answer)) {
             AnswerType.CONFIRMATION -> collectAndDecide(userSpeech = answer)
             AnswerType.INFO -> {
-                goal = "$goal. $answer"
+                // 되묻기가 여러 번 이어지면 goal이 계속 길어진다. 오래된 앞부분을 잘라내면 원래
+                // 목표("사진 보내줘")를 잃으므로, 상한을 넘으면 뒤쪽 답변부터 버린다.
+                val extended = "$goal. $answer"
+                goal = if (extended.length <= MAX_GOAL_LENGTH) {
+                    extended
+                } else {
+                    Log.w(TAG, "goal 길이 상한 초과 — 이번 답변은 goal에 누적하지 않음")
+                    goal
+                }
+                // 목표가 구체화됐으니 화면이 그대로여도 판단이 달라져야 한다. 지문을 지워
+                // "직전과 같은 화면" 스킵에 걸리지 않게 한다.
+                lastScreenFingerprint = null
                 collectAndDecide(userSpeech = null)
             }
         }
     }
 
-    /** "그만"/"취소"/"중단"류 발화인지. 공백을 지운 뒤 키워드 포함 여부로 본다 — STT가 "그만 해줘"처럼
-     * 띄어쓰기를 섞어도 잡힌다. 정보 제공형 답변에 이 단어들이 들어갈 일은 이 도메인에선 드물다고 보고
-     * 단순 포함 매칭을 쓴다(오탐이 관찰되면 정확 일치 목록으로 좁힐 것). */
-    private fun isStopCommand(text: String): Boolean {
-        val normalized = text.replace(Regex("\\s+"), "")
-        return STOP_KEYWORDS.any { normalized.contains(it) }
-    }
+    /** 판정 로직과 그 근거는 [SpeechCommands.isStopCommand]에 있다(단위 테스트로 검증됨). */
+    private fun isStopCommand(text: String): Boolean = SpeechCommands.isStopCommand(text)
 
-    /**
-     * 짧은 예/아니오류 답변만 확인 응답(CONFIRMATION)으로 분류하고, 나머지는 전부 정보 제공형(INFO)으로
-     * 본다. 클라이언트 측 휴리스틱이라 완벽하지 않음 — 오작동이 관찰되면 백엔드가 질문 종류를
-     * 알려주는 방식(DecideResponse에 필드 추가)으로 전환을 검토할 것.
-     */
-    private fun classifyAnswer(text: String): AnswerType {
-        val normalized = text.trim()
-        return if (normalized in CONFIRMATION_ANSWERS) AnswerType.CONFIRMATION else AnswerType.INFO
-    }
+    /** 판정 로직과 그 근거는 [SpeechCommands.classifyAnswer]에 있다(단위 테스트로 검증됨). */
+    private fun classifyAnswer(text: String): AnswerType = SpeechCommands.classifyAnswer(text)
 
     private fun performTargetAction(response: DecideResponse) {
         val node = response.target_node_id?.let { nodeMap[it] }
         if (node == null || response.action_type == null) {
             Log.w(TAG, "target node를 찾지 못함 (target_node_id=${response.target_node_id})")
+            notifyAndRetry("화면을 다시 살펴볼게요.")
             return
         }
 
@@ -576,7 +930,7 @@ class TestAccessibilityService : AccessibilityService() {
         }
 
         val actionResult = when (response.action_type) {
-            ActionType.CLICK -> node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            ActionType.CLICK -> clickWithFallback(node)
             ActionType.SET_TEXT -> {
                 val args = Bundle().apply {
                     putCharSequence(
@@ -586,27 +940,163 @@ class TestAccessibilityService : AccessibilityService() {
                 }
                 node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
             }
+            ActionType.SCROLL -> scrollForward(node)
             else -> false
         }
         Log.i(TAG, "performAction 결과: $actionResult (id=${response.target_node_id})")
-        if (!actionResult) {
+        if (actionResult) {
+            // 방금 화면을 건드렸다. 전환이 끝나기 전에 읽으면 이전 화면과 새 화면이 섞인
+            // 중간 상태를 보게 되므로, 이 시간 동안은 스캔을 막는다.
+            val settleDelay = settleDelayFor(response.action_type)
+            settleUntil = SystemClock.uptimeMillis() + settleDelay
+            Log.d(TAG, "화면 정착 대기 ${settleDelay}ms (action=${response.action_type})")
+            // 화면이 곧 바뀔 것으로 기대한다. 안 바뀌면 워치독이 스스로 다시 스캔한다.
+            armWatchdog()
+        } else {
             Log.w(TAG, "performAction 실패 — 이 스텝은 화면에 아무 영향을 못 줬을 것")
+            notifyAndRetry("잘 안 눌렸어요. 다시 해볼게요.")
         }
+    }
+
+    /**
+     * [AccessibilityNodeInfo.ACTION_CLICK]이 실패했을 때 포기하지 않고 두 단계로 더 시도한다.
+     *
+     * 1. **클릭 가능한 조상으로 올라간다.** Compose 화면(코레일톡 등)은 실제 클릭 핸들러가
+     *    컨테이너에 붙어 있고 라벨은 그 안쪽 텍스트 노드에만 있어서, LLM이 "바로 예매"라는
+     *    글자가 있는 clickable=false 노드를 고르는 일이 잦다. 그 노드는 눌리지 않는다.
+     * 2. **그래도 안 되면 좌표를 직접 탭한다.** 접근성 액션을 아예 처리하지 않는 커스텀 뷰가
+     *    있어서, 화면상 위치를 두드리는 것이 마지막 수단이다
+     *    (`test_accessibility_service_config.xml`의 `canPerformGestures="true"`가 있어야 동작).
+     *
+     * 예전에는 한 번 실패하면 로그만 남기고 끝났고, 화면이 안 바뀌니 접근성 이벤트도 안 와서
+     * 다음 스캔이 예약되지 않아 그 자리에서 영구 정지했다.
+     */
+    private fun clickWithFallback(node: AccessibilityNodeInfo): Boolean {
+        if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+
+        var ancestor: AccessibilityNodeInfo? = node.parent
+        var depth = 1
+        while (ancestor != null && depth <= MAX_CLICK_ANCESTOR_DEPTH) {
+            if (ancestor.isClickable && ancestor.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                Log.i(TAG, "조상 노드로 클릭 성공 (depth=$depth class=${ancestor.className})")
+                return true
+            }
+            ancestor = ancestor.parent
+            depth++
+        }
+
+        return tapCenter(node)
+    }
+
+    /**
+     * 이 동작을 하고 나서 화면이 정착하기까지 기다릴 시간.
+     *
+     * 동작마다 화면이 흔들리는 양상이 다르다:
+     * - CLICK: 화면 전환 애니메이션(보통 300~500ms, 무거운 화면은 더)
+     * - SET_TEXT: 입력 반영에 더해 키보드가 올라오면서 레이아웃 전체가 한 번 더 흔들린다
+     * - SCROLL: 손을 뗀 뒤에도 관성 스크롤이 이어져 가장 오래 흐른다
+     */
+    private fun settleDelayFor(actionType: String?): Long = when (actionType) {
+        ActionType.SET_TEXT -> SETTLE_DELAY_SET_TEXT_MS
+        ActionType.SCROLL -> SETTLE_DELAY_SCROLL_MS
+        else -> SETTLE_DELAY_CLICK_MS
+    }
+
+    /** 노드 bounds 중앙을 제스처로 탭한다. 접근성 액션을 처리하지 않는 커스텀 뷰용 최후 수단. */
+    private fun tapCenter(node: AccessibilityNodeInfo): Boolean {
+        val bounds = Rect().also { node.getBoundsInScreen(it) }
+        if (bounds.width() <= 0 || bounds.height() <= 0) return false
+        val path = Path().apply { moveTo(bounds.exactCenterX(), bounds.exactCenterY()) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0L, TAP_DURATION_MS))
+            .build()
+        val dispatched = dispatchGesture(gesture, null, null)
+        Log.i(TAG, "좌표 탭 폴백: dispatched=$dispatched at (${bounds.exactCenterX()}, ${bounds.exactCenterY()})")
+        return dispatched
+    }
+
+    /**
+     * 목록을 한 화면 앞으로 스크롤한다. LLM이 스크롤 대상으로 고른 노드가 정작 스크롤 컨테이너가
+     * 아닌 경우(목록 안의 항목을 고르는 등)가 있어 스크롤 가능한 조상까지 올라가며 시도한다.
+     */
+    private fun scrollForward(node: AccessibilityNodeInfo): Boolean {
+        var current: AccessibilityNodeInfo? = node
+        var depth = 0
+        while (current != null && depth <= MAX_CLICK_ANCESTOR_DEPTH) {
+            if (current.isScrollable &&
+                current.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+            ) {
+                Log.i(TAG, "스크롤 성공 (depth=$depth class=${current.className})")
+                return true
+            }
+            current = current.parent
+            depth++
+        }
+        return false
+    }
+
+    /**
+     * 일시적인 문제가 났을 때 조용히 멈추지 않고 **화면과 음성 양쪽으로** 알린 뒤 스스로 다시 시도한다.
+     *
+     * 오버레이가 직전 문구("다음 동작 실행 중")인 채로 굳어 있으면 관객 눈에는 앱이 죽은 것으로
+     * 보인다. 그리고 이 앱의 주 사용자는 고령자라 화면 문구만으로는 부족하다 — 무슨 일이
+     * 벌어지는지 귀로도 들려야 기다릴지 중단할지 판단할 수 있다.
+     *
+     * 클릭 실패·네트워크 오류·서버의 일시적 오류(retryable) 셋 다 사용자 입장에서는 같은 상황
+     * ("잠깐 문제가 생겼고 다시 해보는 중")이라 한 경로로 합쳤다. 재시도 자체는 워치독이 맡고,
+     * 횟수는 [MAX_WATCHDOG_RETRIES]로 제한된다.
+     */
+    private fun notifyAndRetry(message: String) {
+        if (!isSessionActive) return
+        Log.w(TAG, "일시적 문제 — 복구 시도: $message")
+        overlay.showOrUpdate(message)
+        voice.speak(message)
+        armWatchdog(RETRY_DELAY_MS)
     }
 
     companion object {
         private const val TAG = "TestA11yService"
 
+        /** 세션의 "주인"이 되는 앱들. 이들 사이를 오가면 새 세션으로 취급한다. */
+        private val PRIMARY_PACKAGES = setOf("com.kakao.talk", "com.kakao.taxi", "com.korail.talk")
+
+        /**
+         * 주 앱이 목표 수행 도중 띄우는 보조 화면들. 여기로 넘어가도 세션은 그대로 이어진다.
+         *
+         * 이 목록이 없으면 카카오톡이 시스템 사진 선택기를 띄우는 순간 접근성 이벤트가 0건이 되고
+         * (packageNames가 OS 레벨 필터라 목록 밖 앱은 이벤트 자체가 안 온다) 자동화가 그 자리에서
+         * 멈춘다. 사진 보내기 시나리오에서 정확히 밟게 되는 경로다.
+         *
+         * 기기마다 어떤 선택기가 뜨는지 달라서 흔한 것들을 함께 넣어 둔다(설치돼 있지 않으면
+         * 그냥 이벤트가 안 올 뿐 부작용은 없다).
+         */
+        private val AUXILIARY_PACKAGES = setOf(
+            "com.google.android.providers.media.module", // Android 시스템 포토피커
+            "com.android.providers.media.module",
+            "com.android.documentsui", // 파일 선택기
+            "com.sec.android.gallery3d", // 삼성 갤러리
+            "com.samsung.android.providers.media", // 삼성 미디어 제공자
+        )
+
         /** 이 서비스가 반응하는 앱 목록. `res/xml/test_accessibility_service_config.xml`의
          * packageNames와 반드시 같이 맞춰야 한다 — 저쪽에 없는 패키지를 여기 추가해도 이벤트
          * 자체가 시스템에서 걸러져서 안 들어온다. */
-        private val TARGET_PACKAGES = setOf("com.kakao.talk", "com.kakao.taxi", "com.korail.talk")
+        private val TARGET_PACKAGES = PRIMARY_PACKAGES + AUXILIARY_PACKAGES
         private const val DEFAULT_GOAL = "카카오톡에서 가장 최근에 찍은 사진 보내줘"
         private const val DEBOUNCE_MS = 500L
 
         /** 이벤트가 쉬지 않고 계속 들어와도(예: 지도 화면 애니메이션) 이 시간이 지나면 강제로
          * 한 번 스캔한다 — 디바운스 starvation 방지. */
-        private const val MAX_BURST_WAIT_MS = 1500L
+        private const val MAX_BURST_WAIT_MS = 2500L
+
+        /**
+         * 동작 직후 화면이 정착하기를 기다리는 시간. [settleDelayFor] 참고.
+         * 이 시간이 끝나기 전에는 [MAX_BURST_WAIT_MS] 상한에 걸려도 스캔하지 않는다 —
+         * 전환 애니메이션 한복판의 화면을 읽는 것이 오판의 주된 원인이었다.
+         */
+        private const val SETTLE_DELAY_CLICK_MS = 800L
+        private const val SETTLE_DELAY_SET_TEXT_MS = 1_000L
+        private const val SETTLE_DELAY_SCROLL_MS = 1_200L
 
         /** 이보다 오래 걸리는 요청에만 "분석 중" 스피너를 보여준다. */
         private const val ANALYZING_INDICATOR_DELAY_MS = 3000L
@@ -621,17 +1111,29 @@ class TestAccessibilityService : AccessibilityService() {
         /** 세션 하나에서 ASK_USER가 연속으로 나올 수 있는 최대 횟수 — 무한 되묻기 방지. */
         private const val MAX_CONSECUTIVE_ASK_USER = 5
 
-        /** [isStopCommand]가 보는 중단 명령 키워드. 공백 제거 후 부분 일치로 매칭한다. */
-        private val STOP_KEYWORDS = setOf(
-            "취소", "그만", "중단", "멈춰", "멈춰줘", "스톱", "스탑", "하지마", "종료",
-        )
+        /** 동작 실행 후 이 시간 안에 화면 변경 이벤트가 없으면 스스로 재스캔한다. [armWatchdog] 참고. */
+        private const val WATCHDOG_TIMEOUT_MS = 7_000L
 
-        // 취소/그만류는 STOP_KEYWORDS가 먼저 잡으므로 여기엔 없다.
-        private val CONFIRMATION_ANSWERS = setOf(
-            "응", "네", "예", "넵", "웅", "맞아", "맞아요", "그래", "그래요",
-            "좋아", "좋아요", "오케이", "콜", "진행", "진행해줘", "진행해주세요",
-            "아니", "아니요", "아니오", "노", "안돼", "안 돼", "싫어",
-        )
+        /** 일시적 실패(서버 오류·클릭 실패) 후 다시 시도하기까지의 간격. */
+        private const val RETRY_DELAY_MS = 1_500L
+
+        /** 워치독이 진행 없음을 감지해 재시도할 수 있는 최대 횟수. 넘으면 사용자에게 알리고 끝낸다. */
+        private const val MAX_WATCHDOG_RETRIES = 3
+
+        /** 한 번에 LLM으로 보내는 요소 개수 상한. 넘으면 조작 가능한 노드를 우선 남긴다. */
+        private const val MAX_ELEMENTS = 120
+
+        /** 클릭/스크롤 폴백이 조상 방향으로 거슬러 올라가는 최대 깊이. */
+        private const val MAX_CLICK_ANCESTOR_DEPTH = 5
+
+        /** 좌표 탭 폴백에서 손가락을 대고 있는 시간. */
+        private const val TAP_DURATION_MS = 60L
+
+        /** 되묻기 답변을 이어붙인 goal의 길이 상한. */
+        private const val MAX_GOAL_LENGTH = 300
+
+        // 중단 명령 키워드/확인 응답 목록은 SpeechCommands로 옮겼다 — 단위 테스트가 붙어 있는
+        // 쪽에 한 벌만 두어야 둘이 따로 놀지 않는다.
 
         /**
          * [com.example.pathpilot.wakeup.WakeAndLaunchActivity]가 화면을 깨우고 카카오톡을 실행하기
@@ -651,5 +1153,29 @@ class TestAccessibilityService : AccessibilityService() {
          */
         @Volatile
         var sessionRequested: Boolean = false
+
+        /**
+         * 지금 자동화 세션이 진행 중인지. **MainActivity가 웨이크 루프를 켜기 전에 확인한다.**
+         *
+         * TTS 1개 + SpeechRecognizer 1개를 MainActivity와 이 서비스가 각각 따로 만들어 쓰는데,
+         * 마이크는 하나뿐이다. 시연 도중 사용자가 홈을 눌렀다가 앱 화면으로 돌아오면
+         * `onResume` -> `restartWakeListening`이 서비스가 쓰던 마이크를 가로채
+         * `ERROR_RECOGNIZER_BUSY`(code=8)가 나고 진행 중이던 되묻기가 깨진다.
+         *
+         * [isSessionActive]의 setter가 갱신하므로 따로 관리할 필요는 없다.
+         */
+        @Volatile
+        var isAutomationRunning: Boolean = false
+
+        /**
+         * 접근성 서비스가 **실제로 살아서 이벤트를 받고 있는지.**
+         *
+         * `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES`에 우리 서비스가 들어 있는 것과는
+         * 다른 이야기다. 서비스가 죽거나(초기화 예외) 앱을 재설치해 바인딩이 끊기면, 설정 목록에는
+         * 그대로 남아 "켜짐"으로 보이지만 이벤트는 하나도 들어오지 않는다. 이 값이 그 둘을
+         * 구분해 주고, [com.example.pathpilot.MainActivity]가 이걸 보고 사용자에게 알린다.
+         */
+        @Volatile
+        var isServiceConnected: Boolean = false
     }
 }

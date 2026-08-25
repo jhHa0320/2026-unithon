@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -13,7 +15,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import com.example.pathpilot.accessibility.AccessibilityStatus
 import com.example.pathpilot.settings.WakeWordSettings
+import com.example.pathpilot.testkit.TestAccessibilityService
 import com.example.pathpilot.ui.permission.PermissionActivity
 import com.example.pathpilot.voice.VoiceInteractionManager
 import com.example.pathpilot.wakeup.WakeAndLaunchActivity
@@ -28,6 +32,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var voice: VoiceInteractionManager
     private lateinit var statusText: TextView
     private lateinit var wakeNameInput: EditText
+
+    /** 접근성 서비스 생존 판정을 잠깐 미뤄서 하기 위한 핸들러. [warnIfAccessibilityServiceIsDead] 참고. */
+    private val serviceCheckHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,16 +70,69 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 접근성 서비스가 죽어 있으면 웨이크 문구를 들어봐야 아무 일도 일어나지 않는다.
+        // 먼저 확인하고, 죽었으면 그 사실을 알리는 것으로 끝낸다.
+        if (warnIfAccessibilityServiceIsDead()) return
         restartWakeListening()
     }
 
     override fun onPause() {
         super.onPause()
+        serviceCheckHandler.removeCallbacksAndMessages(null)
         voice.stopWakeListening()
+    }
+
+    /**
+     * "설정에는 켜져 있는데 실제로는 죽어 있는" 접근성 서비스를 감지해 사용자에게 알린다.
+     * 알렸으면 true를 돌려준다(= 지금 웨이크 리스닝을 시작할 상황이 아니다).
+     *
+     * 이 상태가 왜 생기냐면 — 접근성 서비스가 초기화 중 죽거나, **설정 XML의 capability가 바뀐
+     * 채로 재설치되면**(예: `canPerformGestures` 추가) 기존 승인으로는 바인딩되지 않는다.
+     * 그런데 `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES` 목록에는 그대로 남아 있어서 설정
+     * 화면은 여전히 "켜짐"으로 보인다. 서비스가 죽으면 오버레이 창도 함께 사라지므로 사용자
+     * 눈에는 "중단/종료 버튼이 없어지고 아무 처리도 안 되는" 상태가 되고, 화면 어디에도 단서가
+     * 없다(2026-08-26 실기기 `dumpsys accessibility`의 Crashed services로 확인).
+     * 복구 방법은 접근성 설정에서 껐다 켜는 것뿐이라 그 사실을 그대로 알려준다.
+     *
+     * **판정을 [SERVICE_CHECK_DELAY_MS]만큼 미루는 이유:** 이 액티비티와 접근성 서비스는 같은
+     * 프로세스에서 돈다. 앱을 처음 열어 프로세스가 막 뜨는 참이면 `onResume`이
+     * `onServiceConnected`보다 먼저 실행될 수 있고, 그 순간에 판정하면 멀쩡한 서비스를
+     * "응답하지 않는다"고 잘못 알린다. 잠깐 기다렸다 다시 확인한다.
+     */
+    private fun warnIfAccessibilityServiceIsDead(): Boolean = when (AccessibilityStatus.current(this)) {
+        AccessibilityStatus.State.RUNNING -> false
+
+        // 애초에 켠 적이 없는 정상적인 첫 실행. 권한 화면에서 켜면 된다.
+        AccessibilityStatus.State.NEVER_ENABLED -> {
+            statusText.text = getString(R.string.main_status_accessibility_off)
+            true
+        }
+
+        // 켠 적은 있는데 목록에서 사라졌다 = 서비스가 죽으면서 시스템이 해제한 것.
+        // "켜주세요"가 아니라 "풀렸습니다"라고 말해야 사용자가 상황을 납득한다.
+        AccessibilityStatus.State.TURNED_OFF_UNEXPECTEDLY -> {
+            statusText.text = getString(R.string.main_status_accessibility_turned_off)
+            true
+        }
+
+        // 목록엔 있는데 아직 응답이 없다. 프로세스가 막 뜨는 중일 수 있으니 한 번 더 확인한다.
+        AccessibilityStatus.State.ENABLED_BUT_DEAD -> {
+            statusText.text = getString(R.string.main_status_accessibility_checking)
+            serviceCheckHandler.removeCallbacksAndMessages(null)
+            serviceCheckHandler.postDelayed({
+                if (TestAccessibilityService.isServiceConnected) {
+                    restartWakeListening()
+                } else {
+                    statusText.text = getString(R.string.main_status_accessibility_dead)
+                }
+            }, SERVICE_CHECK_DELAY_MS)
+            true
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        serviceCheckHandler.removeCallbacksAndMessages(null)
         voice.shutdown()
     }
 
@@ -84,6 +144,15 @@ class MainActivity : AppCompatActivity() {
     private fun restartWakeListening() {
         if (!hasMicPermission()) {
             statusText.text = getString(R.string.main_status_need_permission)
+            return
+        }
+
+        // 접근성 서비스가 자동화를 돌리는 중이면 마이크를 건드리지 않는다.
+        // 마이크는 하나뿐인데 MainActivity와 서비스가 각자 SpeechRecognizer를 만들어 쓴다 —
+        // 시연 도중 홈을 눌렀다가 앱으로 돌아오면 onResume이 여기로 들어와서 서비스가 쓰던
+        // 마이크를 가로채고, ERROR_RECOGNIZER_BUSY(code=8)로 진행 중이던 되묻기가 깨진다.
+        if (TestAccessibilityService.isAutomationRunning) {
+            statusText.text = getString(R.string.main_status_automation_running)
             return
         }
 
@@ -128,5 +197,11 @@ class MainActivity : AppCompatActivity() {
                 putExtra(WakeAndLaunchActivity.EXTRA_GOAL, goal)
             },
         )
+    }
+
+    private companion object {
+        /** 접근성 서비스 생존을 판정하기 전에 기다리는 시간. 프로세스가 막 뜨는 참이면
+         * onServiceConnected가 아직 안 왔을 수 있어서 곧바로 판정하면 오탐이 난다. */
+        const val SERVICE_CHECK_DELAY_MS = 1_200L
     }
 }

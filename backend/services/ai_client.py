@@ -65,6 +65,11 @@ def _object_particle(word: str) -> str:
 class AIClient(Protocol):
     """LLM 호출 인터페이스. 구현체는 동기 함수로 두고 라우터가 스레드로 offload한다."""
 
+    # 지금 어느 구현체로 돌고 있는지 /health가 노출하는 데 쓴다. 키가 없으면 서버가 조용히
+    # Mock으로 폴백하는데, Mock은 첫 clickable 요소를 무조건 누르므로 눈치채지 못하면
+    # 시연 중 아무 버튼이나 누르는 그림이 나온다.
+    PROVIDER: str
+
     def decide(
         self,
         goal: str,
@@ -77,6 +82,8 @@ class AIClient(Protocol):
 
 class MockAIClient:
     """규칙 기반 개발용 Mock 구현체. 실제 LLM 연동(B-2) 전까지 사용."""
+
+    PROVIDER = "mock"
 
     def decide(
         self,
@@ -180,6 +187,8 @@ class GeminiAIClient:
 
     동기 호출이다. 라우터가 asyncio.to_thread로 offload하므로 async 처리를 하지 않는다.
     """
+
+    PROVIDER = "gemini"
 
     def __init__(
         self,

@@ -18,6 +18,12 @@ data class ElementDTO(
     val content_description: String?,
     val class_name: String,
     val clickable: Boolean,
+    /** 스크롤 가능한 컨테이너(RecyclerView/ScrollView 등)인지. 목표 항목이 화면 밖에 있을 때
+     * LLM이 SCROLL 대상을 고르는 근거가 된다. */
+    val scrollable: Boolean = false,
+    /** 안드로이드 resource-id(`viewIdResourceName`, 예: `com.kakao.talk:id/btn_send`).
+     * 아이콘만 있어 text·contentDescription이 모두 빈 버튼을 LLM이 식별하는 가장 강한 단서다. */
+    val view_id: String? = null,
     val bounds: List<Int>,
 )
 
@@ -53,6 +59,10 @@ data class DecideResponse(
     val confidence: Double,
     val status: String,
     val reason: String?,
+    /** UNSUPPORTED가 '일시적 실패'(AI 호출 실패·응답 지연)인지. true면 세션을 끝내지 말고
+     * 같은 화면으로 한 번 더 시도해야 한다 — 429나 순간적인 5xx 하나로 세션이 끝나면
+     * 시연 도중 복구할 방법이 없다. 서버가 안 보내면 Gson이 false로 둔다. */
+    val retryable: Boolean = false,
 )
 
 /** [DecideResponse.status] 값 상수. */
@@ -68,4 +78,7 @@ object DecideStatus {
 object ActionType {
     const val CLICK = "CLICK"
     const val SET_TEXT = "SET_TEXT"
+    /** 대상 노드(또는 그 스크롤 가능한 조상)를 한 화면 앞으로 스크롤한다. 목표 항목이 화면
+     * 밖에 있어 클릭할 수 없을 때 쓴다. */
+    const val SCROLL = "SCROLL"
 }

@@ -51,13 +51,55 @@ class VoiceInteractionManager(context: Context) {
      */
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    /**
+     * 발화·인식 콜백의 세대 번호. [cancelAll]이 올린다. 콜백을 등록할 때 이 값을 캡처해 두고
+     * 실행 직전에 다시 비교해서, 값이 달라졌으면(= 그 사이 대화 턴이 통째로 취소됐으면)
+     * 아무것도 하지 않는다.
+     *
+     * TTS/STT 콜백은 "이미 예약된 것"을 코드로 취소할 방법이 마땅치 않다 — [Handler]에 올린
+     * 것만 removeCallbacks로 걷어낼 수 있고, 엔진 내부 스레드에서 뒤늦게 올라오는 콜백은
+     * 막을 수 없다. 그래서 취소를 "실행 시점에 무시한다"로 구현한다.
+     */
+    private var generation = 0
+
+    /**
+     * TTS 엔진 초기화 콜백이 도착했는지(성공·실패 무관). 엔진이 뜨는 데 수백 ms가 걸리는데
+     * 그 사이에 들어온 [speak]를 그냥 흘려보내면 **콜드 스타트 직후 첫 발화가 통째로 씹힌다** —
+     * [askAndListen]이었다면 사용자는 무엇을 묻는지 듣지도 못한 채 마이크만 열린 상태로 남는다.
+     * 그래서 초기화 전에는 [pendingUtterance]에 보관했다가 준비되면 재생한다.
+     */
+    private var isTtsInitialized = false
+
+    /** 초기화 완료를 기다리는 발화. `QUEUE_FLUSH` 의미론과 맞추어 마지막 하나만 유지한다. */
+    private var pendingUtterance: Pair<String, () -> Unit>? = null
+
     init {
         textToSpeech = TextToSpeech(appContext) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                textToSpeech?.language = Locale.KOREAN
+                // setLanguage의 반환값을 확인한다. 한국어 음성 데이터가 없는 기기에서는
+                // 엔진 초기화 자체는 SUCCESS인데 실제로는 아무 소리도 안 난다 — 그 경우
+                // 최소한 로그로는 원인이 남아야 한다.
+                val languageResult = textToSpeech?.setLanguage(Locale.KOREAN)
+                if (languageResult == TextToSpeech.LANG_MISSING_DATA ||
+                    languageResult == TextToSpeech.LANG_NOT_SUPPORTED
+                ) {
+                    Log.e(TAG, "한국어 TTS 데이터 없음 (result=$languageResult) — 음성 안내가 나가지 않는다")
+                }
                 isTtsReady = true
+            } else {
+                Log.e(TAG, "TTS 초기화 실패 (status=$status) — 음성 안내 없이 진행한다")
             }
+            // 성공이든 실패든 "기다림"은 끝났다. 실패했더라도 큐를 풀어줘야 speak가 onDone을
+            // 실행해서 후속 흐름(마이크 열기 등)이 이어진다.
+            isTtsInitialized = true
+            mainHandler.post { flushPendingUtterance() }
         }
+    }
+
+    private fun flushPendingUtterance() {
+        val (text, onDone) = pendingUtterance ?: return
+        pendingUtterance = null
+        speak(text, onDone)
     }
 
     /**
@@ -73,9 +115,17 @@ class VoiceInteractionManager(context: Context) {
      * (2026-08-25 실기기 테스트). 그래서 발화별 id를 비교해서 남의 콜백은 무시한다.
      */
     fun speak(text: String, onDone: () -> Unit = {}) {
+        val myGeneration = generation
+        if (!isTtsInitialized) {
+            // 엔진이 아직 뜨는 중이다. 흘려보내면 첫 발화가 통째로 씹히므로 보관했다가
+            // 초기화 콜백에서 재생한다([flushPendingUtterance]).
+            Log.d(TAG, "TTS 준비 전 — 발화를 큐에 보관")
+            pendingUtterance = text to onDone
+            return
+        }
         val tts = textToSpeech
         if (tts == null || !isTtsReady) {
-            mainHandler.post(onDone)
+            mainHandler.post { if (myGeneration == generation) onDone() }
             return
         }
         val utteranceId = UUID.randomUUID().toString()
@@ -83,13 +133,32 @@ class VoiceInteractionManager(context: Context) {
             override fun onStart(id: String?) {}
             override fun onDone(id: String?) {
                 if (id != utteranceId) return
-                mainHandler.post(onDone)
+                mainHandler.post { if (myGeneration == generation) onDone() }
+            }
+
+            /**
+             * **이 override를 지우면 안 된다.** [UtteranceProgressListener.onStop]의 기본 구현은
+             * `onDone(utteranceId)`로 위임한다 — 즉 `tts.stop()`이나 `QUEUE_FLUSH`로 발화를
+             * 죽인 것이 "정상 재생 완료"로 둔갑한다. 그러면 [askAndListen]의 완료 콜백인
+             * [listenOnce]가 실행되어, 방금 끈 마이크가 곧바로 다시 열린다.
+             *
+             * 실제로 겪은 버그(2026-08-26 보고): 질문을 읽어주는 도중 오버레이의
+             * "중단하기"/"종료하기"를 누르면 세션 정리가 `stopListening()` -> `stopSpeaking()`
+             * 순서로 도는데, 마지막 `stopSpeaking()`이 이 경로로 마이크를 되살려서 종료 후에도
+             * 계속 사용자 입력을 대기했다. 호출 순서를 바꿔도 소용없다 — 콜백이
+             * `mainHandler.post`로 넘어가 [stopListening]이 끝난 뒤에 실행되기 때문이다.
+             *
+             * 취소는 완료가 아니므로 여기서는 아무것도 하지 않는다.
+             */
+            override fun onStop(id: String?, interrupted: Boolean) {
+                if (id != utteranceId) return
+                Log.d(TAG, "발화 취소됨 (id=$id interrupted=$interrupted) — 후속 동작 없음")
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(id: String?) {
                 if (id != utteranceId) return
-                mainHandler.post(onDone)
+                mainHandler.post { if (myGeneration == generation) onDone() }
             }
         })
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
@@ -105,6 +174,7 @@ class VoiceInteractionManager(context: Context) {
         onError: (String) -> Unit = {},
         onListeningChanged: (Boolean) -> Unit = {},
     ) {
+        val myGeneration = generation
         val hasMicPermission = ContextCompat.checkSelfPermission(
             appContext,
             Manifest.permission.RECORD_AUDIO,
@@ -122,12 +192,16 @@ class VoiceInteractionManager(context: Context) {
         // recognizer를 바로 열면, 일부 기기(이번에 겪은 삼성 실기기 포함)에서 새 세션이 사용자가
         // 말을 시작하기도 전에 "무음(NO_SPEECH_DETECTED)"으로 즉시 오판된다(실측: 마이크 연 지
         // ~100ms 만에 에러 — 사람이 그렇게 빨리 말할 수 없다). 아주 짧게 텀을 둬서 이 레이스를 없앤다.
-        val runnable = Runnable { startRecognition(onResult, onError, onListeningChanged) }
+        val runnable = Runnable {
+            if (myGeneration != generation) return@Runnable
+            startRecognition(myGeneration, onResult, onError, onListeningChanged)
+        }
         pendingStart = runnable
         mainHandler.postDelayed(runnable, MIC_REOPEN_DELAY_MS)
     }
 
     private fun startRecognition(
+        myGeneration: Int,
         onResult: (String) -> Unit,
         onError: (String) -> Unit,
         onListeningChanged: (Boolean) -> Unit,
@@ -157,13 +231,24 @@ class VoiceInteractionManager(context: Context) {
                 onListeningChanged(false)
             }
 
+            // 아래 두 콜백은 destroy() 이후에도 뒤늦게 올라올 수 있다. 세대가 바뀌었으면
+            // (= 사용자가 중단/종료를 눌렀으면) 그 답변은 이미 버려진 대화 턴의 것이므로
+            // 흘려보낸다 — 그냥 통과시키면 중단한 뒤에 클릭이 실행되는 사고로 이어진다.
             override fun onError(error: Int) {
                 onListeningChanged(false)
+                if (myGeneration != generation) {
+                    Log.d(TAG, "취소된 대화 턴의 인식 오류 무시 (code=$error)")
+                    return
+                }
                 onError("음성 인식 오류 (code=$error)")
             }
 
             override fun onResults(results: Bundle?) {
                 onListeningChanged(false)
+                if (myGeneration != generation) {
+                    Log.d(TAG, "취소된 대화 턴의 인식 결과 무시")
+                    return
+                }
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 val answer = matches?.firstOrNull()
                 if (answer.isNullOrBlank()) {
@@ -261,6 +346,23 @@ class VoiceInteractionManager(context: Context) {
 
     /** 재생 중인 TTS를 즉시 멈춘다 (인스턴스는 유지 — 이후 [speak] 재사용 가능). */
     fun stopSpeaking() {
+        textToSpeech?.stop()
+    }
+
+    /**
+     * 진행 중인 발화·인식과 **아직 실행되지 않은 콜백까지** 전부 무효화한다.
+     * "지금까지의 대화 턴을 통째로 버린다"는 뜻이므로 세션 중단/종료·새 세션 시작에 쓴다.
+     *
+     * [stopListening] + [stopSpeaking]을 따로 부르는 것과 다른 점: [generation]을 올려서
+     * 이미 엔진에 등록돼 있어 취소할 수 없는 콜백들이 나중에 올라오더라도 실행되지 않게 만든다.
+     * 중단을 눌렀는데 뒤늦게 도착한 음성 결과가 자동화를 다시 굴리는 사고를 막는 마지막 방어선이다.
+     */
+    fun cancelAll() {
+        generation++
+        // 아직 재생되지 않은 대기 발화도 취소 대상이다. 안 지우면 TTS 초기화가 늦게 끝날 때
+        // 이미 중단한 세션의 질문이 뒤늦게 흘러나온다.
+        pendingUtterance = null
+        stopWakeListening() // 내부에서 stopListening()도 함께 호출한다
         textToSpeech?.stop()
     }
 

@@ -12,6 +12,17 @@
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
     android:notificationTimeout="300"
-    android:packageNames="com.kakao.talk,com.kakao.taxi,com.korail.talk"
+    android:packageNames="com.kakao.talk,com.kakao.taxi,com.korail.talk,com.google.android.providers.media.module,com.android.providers.media.module,com.android.documentsui,com.sec.android.gallery3d,com.samsung.android.providers.media"
     android:description="@string/test_accessibility_service_description" />
+<!--
+  canPerformGestures: performAction(ACTION_CLICK)이 통하지 않는 커스텀 뷰에서 좌표를 직접
+  탭하는 폴백(TestAccessibilityService.tapCenter)에 필요하다. 이 속성이 없으면 dispatchGesture가
+  조용히 false를 반환하고 마지막 복구 수단이 사라진다.
+
+  packageNames 뒤쪽 5개는 사진 선택 화면들이다. 카카오톡이 시스템 포토피커나 갤러리를 띄우는
+  순간 그 앱의 이벤트가 필요한데, 목록에 없으면 이벤트가 0건이 되어 자동화가 그 자리에서 멈춘다
+  (사진 보내기 시나리오에서 반드시 밟는 경로). 설치돼 있지 않은 패키지는 그냥 이벤트가 안 올 뿐
+  부작용이 없다. TestAccessibilityService의 PRIMARY_PACKAGES/AUXILIARY_PACKAGES와 같이 맞출 것.
+-->
