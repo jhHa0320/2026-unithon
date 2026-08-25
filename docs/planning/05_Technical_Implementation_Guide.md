@@ -9,7 +9,7 @@ UNWORK Hackathon · 2026.08
 | **핵심 구조** Wake word가 화면 Off 상태에서도 음성을 감지하고, Android Accessibility API가 현재 화면의 UI 정보를 제공하면, LLM이 사용자 목표를 보고 다음 UI 요소를 선택해 AI가 직접 클릭까지 실행한다. 결제·송금 등 금전 실행 action만 서버의 하드코딩된 규칙으로 자동 실행을 막고 사용자 확인을 요구한다. |
 | --- |
 
-[아키텍처] Wake Word → Accessibility → Context → LLM → Auto Action → (결제 직전) Payment Gate → User 확인 → (Mock) 결제수단 연동·완료 화면
+[아키텍처] Wake Word → Accessibility → Context → LLM → Auto Action(Payment Gate까지) → User 확인 → (Mock) 결제수단 연동·완료 화면
 
 # 2. Accessibility API가 실제로 주는 정보
 
@@ -148,7 +148,6 @@ AI는 이 단계의 어떤 버튼도 대신 누르지 않는다.
 | goal | 사용자가 최종적으로 하고 싶은 일 |
 | app | 현재 package/app name |
 | elements | id, text, contentDescription, class, clickable, bounds |
-| history | 직전 2~3단계의 실행 결과만 간단히 |
 | safety | 결제/송금/삭제/권한 변경 키워드는 서버 규칙으로 항상 PAYMENT_GATE/STOP 처리하며, LLM이 이 규칙을 우회할 수 없음 |
 
 | **출력 필드** | **예시** |
