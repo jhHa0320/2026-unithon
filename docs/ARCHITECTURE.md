@@ -73,6 +73,42 @@ flowchart LR
 7. **반복**: 화면이 바뀌면(`TYPE_WINDOW_STATE_CHANGED`/`TYPE_WINDOW_CONTENT_CHANGED`, 디바운스 적용) 3~6단계를 반복 — 출발역 → 도착역 → 날짜 → 조회 → 열차 선택 → 좌석 선택 → **결제 버튼**까지 **중단 없이** 자동 진행.
 8. **실제 결제 완료**: 코레일+ 앱에 사용자가 사전 등록해 둔 실제 결제수단으로 그 앱 자체의 결제 화면이 그대로 실행되고, AI가 마지막 결제 확정 버튼까지 `performAction(ACTION_CLICK)`으로 누른다. 우리 backend/Android는 별도 PG 연동을 만들지 않는다 — 코레일+ 앱이 원래 갖고 있는 결제 흐름을 그대로 자동 조작할 뿐이다. **실제 금전이 이동한다.**
 
+> 위 흐름은 첫 발화에 필요한 정보가 다 담긴 "이상적인 경우"다. 실제로는 발화가 불충분한 경우가 기본값이므로 §3-1을 함께 볼 것.
+
+---
+
+## 3-1. 정보 부족 시 되묻기 (ASK_USER 슬롯필링)
+
+사용자가 처음부터 "내일 아침 서울에서 부산 가는 KTX 예매해줘"처럼 완결된 문장을 말하는 경우는 오히려 예외다. **"기차표 예매해줘"처럼 출발역·도착역·날짜·인원·좌석등급·결제수단 등이 빠진 발화가 기본 전제**이며, 그때마다 AI가 되물어야 한다. 상세 계약은 `CLAUDE.md` §5-1 참고.
+
+```mermaid
+sequenceDiagram
+    participant U as 사용자
+    participant A as Android(음성/오버레이)
+    participant B as 백엔드 /decide
+    participant L as LLM
+
+    U->>A: "기차표 예매해줘" (출발역/도착역/날짜 없음)
+    A->>B: DecideRequest(goal="기차표 예매해줘", elements=현재화면)
+    B->>L: goal + elements + history
+    L-->>B: status=ASK_USER, instruction="어느 역에서 출발하시나요?", target_node_id=null
+    B-->>A: DecideResponse(ASK_USER)
+    A->>U: TTS로 질문 재생 ("어느 역에서 출발하시나요?")
+    U->>A: "서울이요"
+    A->>B: DecideRequest(goal="기차표 예매해줘. 출발역은 서울입니다.", 같은 session_id)
+    Note over A,B: 도착역/날짜/인원/좌석등급/결제수단 등<br/>화면 단계마다 이 패턴이 반복될 수 있음
+    B->>L: goal(누적) + elements + history
+    L-->>B: status=CONTINUE, target_node_id=17 (도착역 입력창)
+    B-->>A: DecideResponse(CONTINUE)
+    A->>A: performAction(ACTION_CLICK/setText)
+```
+
+- **판단 주체는 LLM**이다. 백엔드는 별도 슬롯 검증 로직 없이 LLM의 `ASK_USER` 응답을 그대로 통과시킨다. 이는 confidence 게이트로 인한 강제 override(§7)와는 별개의, LLM이 스스로 "이 화면에서 다음 행동을 확정할 정보가 없다"고 판단한 정상 응답이다.
+- `ASK_USER`일 때 `instruction`은 사용자에게 보여줄/들려줄 **질문 문장**이고 `target_node_id`는 보통 `null`이다(아직 클릭할 게 없음).
+- **답변은 `goal`에 이어붙여서 재요청한다.** 별도 필드를 추가하지 않는다 — `session_id`를 유지한 채 `goal = "{기존 goal}. {사용자 답변}"` 형태로 다음 요청을 보낸다. LLM은 매번 전체 `goal` + 현재 `elements` + `history`를 같이 받으므로 누적된 문맥으로 판단할 수 있다.
+- 좌석등급·결제수단처럼 **화면에 선택지 버튼으로 이미 나와 있는 항목**도 동일 패턴이다 — 사용자가 미리 말하지 않았다면 그 화면에 도달했을 때 LLM이 `ASK_USER`로 물어보고, 답변에 맞는 선택지를 `target_node_id`로 클릭한다(예: "일반실/특실 중 어느 걸로 하시겠어요?").
+- Android 쪽 필요 구현: `ASK_USER` 수신 시 자동 클릭 루프를 멈추고 TTS 질문 재생 → STT로 답변 캡처 → `goal` 누적 후 재요청. §4 Phase 4~5에 포함.
+
 ---
 
 ## 4. Android 파이프라인 상세 (구현 단계 · Phase 0~7)
@@ -85,8 +121,8 @@ flowchart LR
 | 1 | `AccessibilityService` 등록 (Manifest `<service>` + `res/xml/accessibility_service_config.xml`, `canRetrieveWindowContent=true`) | 시스템 설정에서 서비스 켜짐, `onAccessibilityEvent`에서 `packageName` 로그 출력 |
 | 2 | `rootInActiveWindow` 재귀 탐색, `text/contentDescription/className/clickable/boundsInScreen` 덤프 | 코레일+ 실행 시 Logcat에 UI 정보 출력 |
 | 3 | AI 없이 문자열 매칭 → `performAction(ACTION_CLICK)` 자동 클릭 검증 | 지정 문자열 버튼이 실제로 눌림 |
-| 4 | 클릭 가능/의미있는 노드만 추려 session-local id 부여 → `goal + elements` JSON을 백엔드로 전송, 응답 수신 | 백엔드 응답으로 `target_node_id` 수신 확인 |
-| 5 | 화면 변경 이벤트(디바운스) 감지 시 3~4 반복하는 루프 | 여러 단계 연속 자동 진행 |
+| 4 | 클릭 가능/의미있는 노드만 추려 session-local id 부여 → `goal + elements` JSON을 백엔드로 전송, 응답 수신. `status=ASK_USER`면 `instruction`을 TTS로 재생하고 STT로 답변을 받아 `goal`에 이어붙여 재요청 (§3-1) | 백엔드 응답으로 `target_node_id` 수신 확인, `ASK_USER` 왕복 확인 |
+| 5 | 화면 변경 이벤트(디바운스) 감지 시 3~4 반복하는 루프 (되묻기 왕복 포함) | 여러 단계 연속 자동 진행 |
 | 6 | 결제 버튼까지 자동 클릭 계속 진행 (중단 없음) — 코레일+ 앱 자체의 실제 결제 화면·확정 버튼을 그대로 자동 조작 | 실제 결제 완료까지 도달 |
 | 7 | (필요시) 좌석맵 등 텍스트 노드 없는 UI에 대해 Screenshot + Vision fallback | 접근성 라벨 없는 UI에서도 진행 가능 |
 
@@ -186,6 +222,8 @@ SENSITIVE_KEYWORDS: list[str] = ["송금","이체","결제","계좌","비밀번�
 | `backend/services/ai_client.py`가 `MockAIClient` 고정 (`target_node_id=1, confidence=0.99, CONTINUE` 하드코딩) | 실제 LLM 미연동. Anthropic API 연동 필요 | AI/LLM |
 | `android/`가 기본 템플릿 상태 — AccessibilityService·자동클릭·네트워킹·Wake Word 전부 미구현 | §4 Phase 0~7 처음부터 구현 | Android |
 | `request.history`가 요청에는 있지만 서버가 무시하고 자체 세션 history로 덮어씀 | 의도된 동작인지 재확인 | 백엔드 |
+| LLM 프롬프트가 아직 슬롯필링(§3-1) 지시를 포함하지 않음 — `MockAIClient`는 항상 `CONTINUE`만 반환 | 정보 부족 시 `ASK_USER` + 질문 문장을 생성하도록 프롬프트 설계 필요 | AI/LLM |
+| Android에 TTS 질문 재생 / STT 답변 캡처 / `goal` 누적 로직 없음 (§3-1) | `ASK_USER` 응답을 받아도 사용자에게 되물을 방법이 없음 | Android |
 
 ---
 

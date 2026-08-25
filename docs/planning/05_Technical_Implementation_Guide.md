@@ -34,7 +34,9 @@ Android가 "이 버튼은 결제 기능이다"라는 비즈니스 의미를 직�
 
 현재 화면에서 수집한 클릭 가능한 UI가 [출발역, 도착역, 날짜, 조회]라면, 서버는 이를 JSON으로 만들고 LLM에게 "다음으로 선택할 element ID와 입력값"을 반환하도록 요청한다. 반환된 targetNodeId에 대해 즉시 performAction(ACTION_CLICK) 또는 setText를 실행한다. targetNodeId의 라벨이 결제/구매/확정 계열이어도 자동 실행을 막지 않는다 — 코레일+ 앱의 실제 결제 확정 버튼까지 동일하게 자동 클릭해 실제 결제를 완료한다.
 
-[에이전트 루프] 한 번에 한 단계만 판단하여 오류 전파를 줄인다.
+**첫 발화가 정보를 다 담고 있지 않을 때** (오히려 기본 케이스): 사용자가 "기차표 예매해줘"라고만 말했다면, [출발역, 도착역, 날짜, 조회] 화면에서 LLM은 어떤 요소를 클릭할지 확정할 수 없다. 이때 LLM은 targetNodeId 대신 `status="ASK_USER"`와 `instruction="어느 역에서 출발하시나요?"`를 반환한다. Android는 이 문장을 TTS로 재생하고, 사용자의 답변("서울이요")을 STT로 받아 `goal`에 이어붙여("기차표 예매해줘. 출발역은 서울입니다.") 같은 session으로 재요청한다. 도착역·날짜·인원·좌석등급·결제수단 등 화면이 요구하는 정보가 나올 때마다 이 왕복이 반복된다.
+
+[에이전트 루프] 한 번에 한 단계만 판단하여 오류 전파를 줄인다. 정보가 부족하면 판단을 강행하지 않고 되묻는다.
 
 # 4. 권장 기술 스택
 
@@ -105,13 +107,15 @@ LLM 응답은 targetNodeId, action(click/setText), value, confidence, status 정
 
 결제/구매/확정 계열 라벨이어도 자동 실행 대상에서 제외하지 않는다 — 목적지~좌석과 동일하게 자동 클릭 대상이며, 결제 화면의 요소도 동일한 루프로 계속 진행된다.
 
+**status가 ASK_USER면 클릭하지 않는다.** targetNodeId는 null이고 instruction에 사용자에게 물어볼 질문이 담겨 있다. Android는 이 문장을 TTS로 재생하고 STT 답변을 받아 goal에 이어붙여 재요청하는 로직을 이 단계에서 함께 구현한다.
+
 ## Phase 5. 반복 루프
 
 TYPE_WINDOW_STATE_CHANGED/TYPE_WINDOW_CONTENT_CHANGED 등 이벤트 발생 감지.
 
 Debounce를 적용해 화면이 안정된 뒤 새 UI Tree를 수집.
 
-같은 goal을 유지한 채 LLM에 새 상태를 전달하고 자동 실행을 반복 — 결제 확정 버튼까지 멈추지 않는다.
+같은 goal을 유지한 채 LLM에 새 상태를 전달하고 자동 실행을 반복 — 결제 확정 버튼까지 멈추지 않는다. status가 ASK_USER인 동안은 되묻기 왕복(Phase 4)을 반복하고, 정보가 채워지면 다시 CONTINUE로 자동 클릭이 재개된다.
 
 status가 DONE이 되면(코레일+ 앱이 예매 완료 화면을 띄우면) accessibility 자동 클릭 루프를 멈춘다.
 
@@ -140,15 +144,18 @@ Android 클라이언트는 별도의 Mock 저장소나 로컬 상태만으로 �
 | goal | 사용자가 최종적으로 하고 싶은 일 |
 | app | 현재 package/app name |
 | elements | id, text, contentDescription, class, clickable, bounds |
+| history | 최근 진행 스텝 요약 (되묻기로 채워진 슬롯도 goal에 누적되어 여기 반영됨) |
 | safety | 민감정보(비밀번호/주민번호/계좌번호 등)는 LLM 전송 전 서버단에서 마스킹. confidence가 임계값 미만이면 서버가 status를 ASK_USER로 강제 override |
 
 | **출력 필드** | **예시** |
 | --- | --- |
-| targetNodeId | 17 |
+| targetNodeId | 17 (ASK_USER일 때는 보통 null) |
 | action | click / setText |
 | value | "부산" (setText인 경우) |
 | confidence | 0.91 |
 | status | CONTINUE / DONE / ASK_USER / UNSUPPORTED |
+
+**프롬프트 지시사항에 명시할 것**: "현재 화면 요소와 지금까지의 goal만으로 다음에 클릭/입력할 요소를 확정할 수 없다면(예: 출발역·도착역·날짜·인원·좌석등급·결제수단 등이 아직 말해지지 않음), targetNodeId를 추측하지 말고 status="ASK_USER"와 함께 instruction에 사용자에게 물어볼 질문 한 문장을 담아 반환하라." 이 지시가 없으면 LLM이 불확실한 슬롯을 임의로 채워 잘못된 열차/좌석/결제로 진행할 위험이 있다.
 
 # 7. 안전 설계
 
@@ -197,6 +204,8 @@ AccessibilityService로 목적지·시간·좌석·결제까지 자동 실행하
 
 "응답 status가 CONTINUE면 즉시 performAction으로 실행해줘. 결제/구매 라벨이어도 동일하게 실행해."
 
+"응답 status가 ASK_USER면 자동 클릭을 멈추고 instruction 문장을 TTS로 재생해줘. 이어서 STT로 사용자 답변을 받아서 goal 뒤에 이어붙인 다음, 같은 session_id로 다시 요청을 보내줘."
+
 "민감 텍스트 마스킹과 지원 제외 package/화면 정책을 추가해줘."
 
 "결제 단계 요소(라벨이 결제/구매/확정 계열)도 동일한 accessibility 자동 클릭 루프로 실행해줘 — 코레일+ 앱의 실제 결제 화면·확정 버튼까지 그대로 눌러서 실제 결제를 완료시켜야 해. 별도의 Mock 결제 화면은 만들지 않아."
@@ -208,6 +217,8 @@ AccessibilityService로 목적지·시간·좌석·결제까지 자동 실행하
 □ 코레일+ 자동 실행
 
 □ 목적지/날짜 자동 입력 성공
+
+□ 정보 부족한 발화("기차표 예매해줘")에서 되묻기(ASK_USER) → TTS 질문 재생 → STT 답변 → goal 누적 재요청 왕복 성공
 
 □ 열차/좌석 자동 선택 성공
 
