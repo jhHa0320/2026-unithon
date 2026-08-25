@@ -6,16 +6,16 @@
 - [ ] **1. 안드로이드 권한 설정 화면** (Accessibility, Microphone, Overlay)
 - [ ] **2. Retrofit 네트워킹 구조 구축** (API_SPEC 기반) 🔗 *의존: 멤버 B의 Mock 서버*
 - [ ] **3. TTS-STT 연속 대화 로직** (말 끝난 후 마이크 자동 활성화)
-- [ ] **4. 최종 결제 완료 Mock UI 및 오버레이 연출**
+- [ ] **4. 최종 전송 완료 Mock UI 및 오버레이 연출**
 
 ## 🧑‍💻 멤버 B (AI / Backend)
 - [x] **1. 기초 Mock 서버 구축 (가장 먼저!)** 🔗 *전체 팀의 첫 단추* — 계약 v2.0 확정(`dumps/API_SPEC.md`), 29 tests green
-- [x] **2. Gemini API 연동** — `gemini-3.7-flash` + `thinking_level: low`. ⚠️ *1.5 Flash는 2025-09-29 서비스 종료되어 사용 불가 → 최신 세대로 대체함*
+- [x] **2. Gemini API 연동** — `gemini-3.6-flash` + `thinking_level: low`. ⚠️ *1.5 Flash는 종료, 최신 3.7-flash는 실측 응답 29초라 미사용. 상세 근거는 CLAUDE.md §9 참고*
 - [ ] **3. UI Tree 분석 프롬프트 엔지니어링** 🔗 *의존: 멤버 C의 UI 덤프 파일*
 - [ ] **4. 사용자 긍정어(Yes/No) 판단 로직 구현**
 
 ## 🧑‍💻 멤버 C (Auto / Action)
-- [ ] **1. 코레일 앱 주요 화면 UI Tree 덤프** 🔗 *멤버 B에게 즉시 전달 필요*
+- [ ] **1. 카카오톡 앱 주요 화면 UI Tree 덤프** (채팅 목록·대화방·첨부·앨범·전송 화면) 🔗 *멤버 B에게 즉시 전달 필요*
 - [ ] **2. AccessibilityService 기반 UI 추출 로직 정교화**
 - [ ] **3. 서버 응답 기반 자동 클릭/텍스트 입력 실행부**
 - [ ] **4. 전체 자동화 루프 및 화면 전환 감지(디바운스 포함)**
