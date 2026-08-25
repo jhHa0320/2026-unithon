@@ -1,23 +1,41 @@
-from pydantic import BaseModel, field_validator
-from typing import Optional, List
+from pydantic import BaseModel, Field, field_validator
 
-class UIElement(BaseModel):
-    node_id: str
-    text: Optional[str] = None
-    content_desc: Optional[str] = None
+
+class ElementDTO(BaseModel):
+    """접근성 서비스가 추출한 화면 노드 1개. 요청 처리 중에만 메모리에 존재하며 저장하지 않는다."""
+
+    id: int
+    text: str | None = None
+    content_description: str | None = None
+    class_name: str
     clickable: bool
-    bounds: List[int]  # [left, top, right, bottom]
+    bounds: list[int]  # [left, top, right, bottom]
 
     @field_validator("bounds")
     @classmethod
-    def validate_bounds(cls, value: List[int]) -> List[int]:
+    def validate_bounds(cls, value: list[int]) -> list[int]:
         if len(value) != 4:
             raise ValueError("bounds must contain exactly 4 integers")
+        left, top, right, bottom = value
+        if left >= right:
+            raise ValueError("bounds requires left < right")
+        if top >= bottom:
+            raise ValueError("bounds requires top < bottom")
         return value
+
+
+class HistoryEntry(BaseModel):
+    """이전 step에서 에이전트가 무엇을 선택했는지에 대한 요약. LLM에 최근 몇 개만 전달한다."""
+
+    step: int
+    selected_text: str
+
 
 class DecideRequest(BaseModel):
     session_id: str
     goal: str
-    current_app: str
-    ui_tree: List[UIElement]
-    user_speech: Optional[str] = None
+    app_package: str
+    elements: list[ElementDTO] = Field(min_length=1)
+    # 사용자의 음성 응답(STT 결과). 확인 질문에 대한 답변 등 대화 턴에서만 채워진다.
+    user_speech: str | None = None
+    history: list[HistoryEntry] | None = None

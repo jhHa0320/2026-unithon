@@ -56,11 +56,11 @@
 ```python
 class ElementDTO(BaseModel):
     id: int
-    text: str | None
-    content_description: str | None
+    text: str | None = None
+    content_description: str | None = None
     class_name: str
     clickable: bool
-    bounds: list[int]  # [left, top, right, bottom]
+    bounds: list[int]  # [left, top, right, bottom] — 4개, left<right, top<bottom
 
 class HistoryEntry(BaseModel):
     step: int
@@ -70,39 +70,50 @@ class DecideRequest(BaseModel):
     session_id: str
     goal: str
     app_package: str
-    elements: list[ElementDTO]
-    history: list[HistoryEntry] | None = None
+    elements: list[ElementDTO] = Field(min_length=1)
+    user_speech: str | None = None       # 예/아니오 등 확인 응답 (§5-1 참고)
+    history: list[HistoryEntry] | None = None  # 생략 시 서버가 session_id로 조회
 ```
 
 ### Response
 
 ```python
 class DecideResponse(BaseModel):
-    target_node_id: int | None
-    instruction: str
-    confidence: float
+    target_node_id: int | None = None
+    action_type: Literal["CLICK", "SET_TEXT"] | None = None
+    input_value: str | None = None       # SET_TEXT일 때 입력할 값
+    instruction: str                     # 로그/디버깅용 — 사용자에게 읽어주지 않음
+    voice_message: str = ""              # TTS로 읽어줄 문구
+    confidence: float                    # 0.0 ~ 1.0
     status: Literal["CONTINUE", "DONE", "ASK_USER", "UNSUPPORTED"]
-    reason: str | None
+    reason: str | None = None
 ```
 
 > id는 string이 아니라 int. camelCase 초안은 폐기, 이 스키마로 통일한다. Android 쪽 `model/Types.kt`와 필드명이 정확히 일치하는지 Android 담당자가 대조 확인할 것.
+>
+> **불변식 (서버가 보장, 클라이언트는 신뢰해도 됨)**: `target_node_id != null`이면 `action_type != null`이고, `action_type == "SET_TEXT"`이면 `input_value != null`이다. LLM 응답이 이를 위반하면 서버가 `UNSUPPORTED`로 강등한다.
+>
+> **에러 응답은 이 스키마가 아니다.** 검증 실패·서버 오류 시 `{"error_code": ..., "message": ...}` 포맷으로 응답하므로 클라이언트는 HTTP 상태코드(422/4xx/5xx)로 먼저 분기해야 한다. 상세는 `dumps/API_SPEC.md` 참고.
 
 ## 5-1. 정보 부족 시 되묻기 (ASK_USER 슬롯필링)
 
 사용자의 첫 발화가 예매에 필요한 정보(출발역·도착역·날짜·인원·좌석등급·결제수단 등)를 다 담고 있지 않은 경우가 기본 전제다. 예: "기차표 예매해줘"만 말하고 끝나는 경우.
 
-- **판단 주체는 LLM이다.** 백엔드가 별도 슬롯 검증 로직을 두지 않는다 — 현재 화면 요소와 지금까지의 `goal`/`history`만으로 다음 클릭/입력을 확정할 수 없다고 LLM이 판단하면, `status="ASK_USER"`, `instruction`에 사용자에게 물어볼 질문 문장(예: "어느 역에서 출발하시나요?"), `target_node_id=null`을 반환한다. 이는 §4의 confidence 게이트로 인한 강제 override와는 별개의, LLM 스스로의 정상적인 응답이다.
+- **판단 주체는 LLM이다.** 백엔드가 별도 슬롯 검증 로직을 두지 않는다 — 현재 화면 요소와 지금까지의 `goal`/`history`만으로 다음 클릭/입력을 확정할 수 없다고 LLM이 판단하면, `status="ASK_USER"`, `voice_message`에 사용자에게 물어볼 질문 문장(예: "어느 역에서 출발하시나요?"), `target_node_id=null`을 반환한다. 이는 §4의 confidence 게이트로 인한 강제 override와는 별개의, LLM 스스로의 정상적인 응답이다.
 - **되묻기는 화면 단계마다 반복될 수 있다** — 출발역을 물어본 다음 응답에는 도착역을, 그다음엔 날짜를, 좌석 선택 화면에서는 좌석등급을, 결제 화면에서는 결제수단(여러 개 등록돼 있다면)을 묻는 식으로 매 스텝 반복 가능하다.
-- **답변 전달 방식**: Android는 `status="ASK_USER"`를 받으면 `instruction`을 사용자에게 음성/화면으로 노출하고, 사용자의 답변(음성 STT 또는 터치 입력)을 받아 **같은 `session_id`로, `goal`에 답변을 이어붙여** 재요청한다. 예: `goal = "기차표 예매해줘"` → 답변 후 `goal = "기차표 예매해줘. 출발역은 서울, 인원은 2명입니다."`. 별도의 `answer` 필드는 두지 않는다 — 스키마를 유지한 채 `goal` 누적만으로 처리한다.
+- **답변 전달 방식** — 답변의 성격에 따라 두 경로로 나뉜다. 둘 다 같은 `session_id`로 재요청한다.
+  - **정보 제공형 답변**("서울역이요", "2명이요")은 **`goal`에 이어붙인다**. 예: `goal = "기차표 예매해줘"` → `goal = "기차표 예매해줘. 출발역은 서울, 인원은 2명입니다."`. 목표 자체를 영구히 구체화하는 정보이므로 이후 모든 스텝에서 계속 유효해야 하기 때문이다.
+  - **예/아니오 확인 응답**("응", "아니 취소해줘")은 **`user_speech`에 담는다**. 직전 질문에만 유효한 일회성 응답이라 `goal`에 누적하면 목표 문장이 오염된다. 긍정/부정 판정은 백엔드가 수행한다(작업 B-4).
+- **읽어줄 문구는 항상 `voice_message`다.** `instruction`은 서버 로그·디버깅용 요약이므로 TTS로 읽지 말 것.
 - 이 흐름은 `elements`(현재 화면 요소)와 함께 매번 새로 전송되므로, 사용자가 답변하는 사이 화면이 안 바뀌어도 문제없다.
 
 1. 요청 수신 및 pydantic 검증 (`elements` 빈 배열 체크, `bounds` 4개 정수·`left<right`·`top<bottom` 검증)
-2. safety 필터링 — 위험 키워드(송금/결제/삭제/인증 등) 매칭 element를 LLM 전달 목록에서 제외
+2. 민감 요소 **탐지** — 위험 키워드(결제/인증/삭제 등) 매칭 element를 로그용으로 카운트만 한다. §4-1대로 결제까지 자동 진행해야 하므로 **elements에서 제외하지 않는다**
 3. 세션 로드 — `session_id`로 history(최근 2~3개) 조회
 4. 민감 텍스트 마스킹
 5. LLM 호출 (`services/ai_client.py`)
 6. confidence 게이트 — 임계값 미만이면 `ASK_USER`로 강제 override
-7. 응답 검증 — `target_node_id`가 원본 elements에 실재하는지 확인, 없으면 `UNSUPPORTED`
+7. 응답 검증 — `target_node_id`가 원본 elements에 실재하는지, `action_type`/`input_value`가 정합한지 확인. 위반 시 `UNSUPPORTED`
 8. 로깅 — `text`/`content_description` 원문 제외하고 기록
 9. 세션 갱신
 10. 응답 반환
@@ -116,8 +127,8 @@ project-root/
 │ ├── routers/
 │ │ └── decide.py
 │ ├── services/
-│ │ ├── ai_client.py # LLM 호출
-│ │ ├── safety.py # 필터링, confidence 게이트, 마스킹
+│ │ ├── ai_client.py # LLM 호출 (현재는 규칙 기반 MockAIClient)
+│ │ ├── safety.py # 마스킹, confidence 게이트, 응답 검증 (결제는 차단하지 않음)
 │ │ └── session.py # session_id 기반 history 관리
 │ ├── schemas/
 │ │ ├── request.py # DecideRequest, ElementDTO, HistoryEntry
