@@ -2,12 +2,18 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- 멤버 A(Infra/Voice/UX) 담당 권한. Accessibility 서비스 자체 선언은 멤버 C가 service/ 아래에 추가 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Pathpilot">
@@ -21,6 +27,27 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- exported=true는 adb로 직접 테스트하기 위한 임시 설정. 팀 통합 시 false로 되돌릴 것 -->
+        <activity
+            android:name=".ui.permission.PermissionActivity"
+            android:exported="true" />
+
+        <!--
+          멤버 A 개인 테스트용 서비스. 카카오톡 하나만 대상(res/xml/test_accessibility_service_config.xml).
+          멤버 C가 정식 AccessibilityService를 만들면 이 <service> 블록과 관련 파일은 지운다.
+        -->
+        <service
+            android:name=".testkit.TestAccessibilityService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/test_accessibility_service_config" />
+        </service>
     </application>
 
 </manifest>

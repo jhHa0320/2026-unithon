@@ -1,3 +1,12 @@
 <resources>
     <string name="app_name">pathpilot</string>
+
+    <!-- 멤버 A: ui/permission/PermissionActivity -->
+    <string name="permission_title">시작 전 권한 설정</string>
+    <string name="permission_button_accessibility">접근성 서비스 켜기</string>
+    <string name="permission_button_microphone">마이크 허용</string>
+    <string name="permission_button_overlay">다른 앱 위에 표시 허용</string>
+
+    <!-- 멤버 A: 개인 테스트용 AccessibilityService (카카오톡 사진 전송 시나리오) -->
+    <string name="test_accessibility_service_description">테스트용: 카카오톡 화면을 읽고 AI 지시에 따라 클릭합니다.</string>
 </resources>
