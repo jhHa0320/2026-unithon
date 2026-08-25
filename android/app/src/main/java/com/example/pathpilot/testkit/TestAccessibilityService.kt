@@ -53,6 +53,11 @@ class TestAccessibilityService : AccessibilityService() {
     private val debounceHandler = Handler(Looper.getMainLooper())
     private var pendingCollect: Runnable? = null
 
+    /** "분석 중" 스피너를 3초 이상 걸릴 때만 보여주기 위한 지연 타이머. 빠르게 끝나는 대부분의
+     * 요청(2~3초대)에서는 깜빡임 없이 조용히 지나가고, 느려질 때만 사용자에게 알린다. */
+    private val analyzingIndicatorHandler = Handler(Looper.getMainLooper())
+    private var pendingAnalyzingIndicator: Runnable? = null
+
     private var sessionId: String = UUID.randomUUID().toString()
     private var goal: String = DEFAULT_GOAL
     private var isSessionActive = false
@@ -145,6 +150,7 @@ class TestAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         pendingCollect?.let { debounceHandler.removeCallbacks(it) }
+        cancelAnalyzingIndicator()
         serviceScope.cancel()
         overlay.hide()
         voice.shutdown()
@@ -203,7 +209,7 @@ class TestAccessibilityService : AccessibilityService() {
         if (elements.isEmpty()) return
 
         isRequestInFlight = true
-        overlay.showOrUpdate("화면 분석 중… (${elements.size}개 요소)")
+        scheduleAnalyzingIndicator()
 
         val request = DecideRequest(
             session_id = sessionId,
@@ -224,8 +230,23 @@ class TestAccessibilityService : AccessibilityService() {
                 overlay.showOrUpdate("서버 호출 실패: ${e.message}")
             } finally {
                 isRequestInFlight = false
+                cancelAnalyzingIndicator()
             }
         }
+    }
+
+    /** 3초 안에 응답이 오면 스피너를 아예 안 보여준다 — 대부분의 요청(2~3초대)에서는 화면이
+     * 조용하고, 느려질 때만("3초 이상") 지금 분석 중이라는 걸 스피너로 알린다. */
+    private fun scheduleAnalyzingIndicator() {
+        cancelAnalyzingIndicator()
+        val runnable = Runnable { overlay.showAnalyzing() }
+        pendingAnalyzingIndicator = runnable
+        analyzingIndicatorHandler.postDelayed(runnable, ANALYZING_INDICATOR_DELAY_MS)
+    }
+
+    private fun cancelAnalyzingIndicator() {
+        pendingAnalyzingIndicator?.let { analyzingIndicatorHandler.removeCallbacks(it) }
+        pendingAnalyzingIndicator = null
     }
 
     private fun handleResponse(response: DecideResponse) {
@@ -284,7 +305,12 @@ class TestAccessibilityService : AccessibilityService() {
         }
         voice.askAndListen(
             question = question,
-            onAnswer = { answer -> routeAnswer(answer) },
+            onAnswer = { answer ->
+                // 사용자가 방금 뭐라고 답했는지는 항상 화면에 보여야 한다 — 잘 알아들었는지
+                // 스스로 확인할 수 있게.
+                overlay.showOrUpdate("입력: $answer")
+                routeAnswer(answer)
+            },
             onError = { err ->
                 overlay.showOrUpdate("답변 인식 실패($err), 다시 물어봅니다.")
                 askUserWithRetry(question, attempt + 1)
@@ -357,6 +383,9 @@ class TestAccessibilityService : AccessibilityService() {
         private const val TARGET_PACKAGE = "com.kakao.talk"
         private const val DEFAULT_GOAL = "카카오톡에서 가장 최근에 찍은 사진 보내줘"
         private const val DEBOUNCE_MS = 500L
+
+        /** 이보다 오래 걸리는 요청에만 "분석 중" 스피너를 보여준다. */
+        private const val ANALYZING_INDICATOR_DELAY_MS = 3000L
 
         /** STT 인식 실패 시 같은 질문을 다시 묻는 최대 횟수. */
         private const val MAX_ASK_RETRIES = 3

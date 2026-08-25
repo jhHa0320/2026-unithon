@@ -13,13 +13,14 @@
         android:layout_height="wrap_content"
         android:layout_marginBottom="24dp"
         android:text="@string/app_name"
-        android:textSize="20sp"
+        android:textSize="26sp"
         android:textStyle="bold" />
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="@string/main_wake_name_label" />
+        android:text="@string/main_wake_name_label"
+        android:textSize="18sp" />
 
     <EditText
         android:id="@+id/input_wake_name"
@@ -28,7 +29,8 @@
         android:layout_marginTop="8dp"
         android:hint="@string/main_wake_name_hint"
         android:inputType="text"
-        android:importantForAutofill="no" />
+        android:importantForAutofill="no"
+        android:textSize="18sp" />
 
     <Button
         android:id="@+id/button_save_wake_name"
@@ -36,26 +38,31 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
         android:layout_marginBottom="24dp"
-        android:text="@string/main_save_wake_name" />
+        android:text="@string/main_save_wake_name"
+        android:textSize="16sp" />
 
+    <!-- 지금 상태(웨이크 대기/듣는 중/처리 중)와, 사용자가 실제로 말한 내용을 보여주는 핵심 텍스트라
+         가장 크게 둔다. -->
     <TextView
         android:id="@+id/text_wake_status"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginBottom="16dp"
-        android:textSize="16sp" />
+        android:textSize="24sp" />
 
     <Button
         android:id="@+id/button_start_listening"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginBottom="8dp"
-        android:text="@string/main_restart_listening" />
+        android:text="@string/main_restart_listening"
+        android:textSize="16sp" />
 
     <Button
         android:id="@+id/button_open_permissions"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="@string/main_open_permissions" />
+        android:text="@string/main_open_permissions"
+        android:textSize="16sp" />
 
 </LinearLayout>

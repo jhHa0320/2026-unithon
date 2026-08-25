@@ -115,7 +115,8 @@ class MainActivity : AppCompatActivity() {
             },
             onHeard = { heard ->
                 // 웨이크 문구가 왜 안 걸리는지(STT가 다르게 알아들었는지) 화면에서 바로 보이게 한다.
-                statusText.text = getString(R.string.main_status_heard_not_wake, heard, wakePhrase)
+                // 설명 문구 없이 사용자가 실제로 말한 내용만 보여준다.
+                statusText.text = getString(R.string.main_status_heard_not_wake, heard)
             },
         )
     }
