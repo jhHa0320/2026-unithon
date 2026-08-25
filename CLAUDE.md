@@ -43,10 +43,11 @@
 
 ## 4-1. 결제·예매 연동 범위 (In-Scope / Out-of-Scope)
 
-이번 해커톤 스코프에서는 실제 결제망에 연결하지 않는다.
+결제는 Mock이 아니라 **코레일+ 앱의 실제 결제 플로우**를 그대로 자동 실행한다. 실제 금전이 이동한다.
 
-- **In-Scope**: 앱에 등록해 둔 결제수단(Mock)이 예매 앱과 연동되어 결제·예매가 완료되는 것처럼 보이는 UI/UX 데모 플로우. 목적지·시간·좌석 선택부터 결제까지 AI가 중단 없이 자동 진행한다. Android 클라이언트 로컬 상태 전환만으로 구현(예: `PaymentMockRepository.completePayment()`가 delay 후 성공 결과를 반환).
-- **Out-of-Scope**: 실제 PG사 결제 승인/취소 연동, 외부 예매 플랫폼(코레일·SRT 등)과의 Real-time API 결제 확정. backend는 이런 연동을 구현하지 않는다.
+- **In-Scope**: 목적지·시간·좌석 선택부터 결제 완료까지 AI가 accessibility 자동 클릭(`performAction(ACTION_CLICK)`/`setText`)으로 중단 없이 진행한다. 코레일+ 앱에 사용자가 사전 등록해 둔 실제 결제수단으로 그 앱 자체의 결제 화면이 그대로 실행된다.
+- **Out-of-Scope**: 우리 backend/Android가 PG사 API를 직접 호출하는 별도 연동을 새로 만드는 것. 결제는 어디까지나 코레일+ 앱 자체 UI를 자동 조작해 그 앱이 원래 갖고 있는 결제 흐름을 그대로 타는 방식이며, 우리 시스템이 결제망에 직접 연결되지는 않는다.
+- 실제 금전이 이동하므로 테스트/데모 시 반복 실행에 각별히 주의할 것 (매크로 탐지, 중복 결제 리스크 — `docs/planning/01` §리스크 참고).
 
 ## 5. API 계약 — `POST /api/v1/decide`
 
@@ -172,7 +173,7 @@ project-root/
 ## 12. 하지 말 것
 
 - Redis, 외부 DB 등 스코프 밖 인프라 도입 금지
-- 실제 PG/외부 예매 플랫폼 결제 확정 API 연동 금지 — 결제는 Android 로컬 Mock으로만 구현 (4-1 참고)
+- 우리 backend/Android가 PG사 API를 직접 연동하는 것 금지 — 결제는 코레일+ 앱 자체의 실제 결제 화면을 accessibility로 자동 조작해 실행 (4-1 참고)
 - confidence 임계값, 위험 키워드 목록 하드코딩 금지 — config.py에서 관리
 - 빈 elements 리스트 등 예외 상황에서 서버가 죽지 않고 항상 에러 포맷으로 응답하게 할 것
 - 다른 담당자 폴더(backend가 아니면 android/, 그 반대도 마찬가지)의 코드를 사전 협의 없이 수정하지 말 것

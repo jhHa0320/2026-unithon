@@ -17,9 +17,8 @@ flowchart LR
         AS["AccessibilityService\n(대상 앱 UI Tree 읽기)"]
         CB["Context Builder\n(UI Tree → DecideRequest JSON)"]
         NET["Network Client\n(Retrofit → POST /api/v1/decide)"]
-        ACT["Auto Action\n(performAction ACTION_CLICK / setText, 결제 단계 포함)"]
-        MOCK["Mock 결제 연동·완료 화면\n(PaymentMockRepository, 자동 트리거)"]
-        TARGET["대상 앱\n(코레일+)"]
+        ACT["Auto Action\n(performAction ACTION_CLICK / setText, 실제 결제 버튼 포함)"]
+        TARGET["대상 앱\n(코레일+, 실제 결제 화면 포함)"]
     end
 
     subgraph Backend["백엔드 (FastAPI)"]
@@ -41,12 +40,11 @@ flowchart LR
     AI --> API
     API -->|"DecideResponse"| NET
     NET --> ACT
-    ACT -->|"클릭/입력 실행"| TARGET
+    ACT -->|"클릭/입력 실행 (결제 버튼 포함)"| TARGET
     TARGET -->|"화면 변경 이벤트"| AS
-    ACT -.->|"결제 단계 도달 시"| MOCK
 ```
 
-**핵심 한 줄**: Wake Word가 화면 Off 상태에서 발화를 인식하면, AccessibilityService가 대상 앱(코레일+) 화면을 읽어 백엔드에 보내고, 백엔드는 LLM에게 "다음에 클릭/입력할 요소 하나"만 판단시켜 돌려준다. Android는 그 판단을 목적지·시간·좌석 선택부터 결제까지 **중단 없이 그대로 실행(자동 클릭)한다**. 결제 자체는 실제 PG 연동 없이 앱 내부 Mock으로만 완료된다.
+**핵심 한 줄**: Wake Word가 화면 Off 상태에서 발화를 인식하면, AccessibilityService가 대상 앱(코레일+) 화면을 읽어 백엔드에 보내고, 백엔드는 LLM에게 "다음에 클릭/입력할 요소 하나"만 판단시켜 돌려준다. Android는 그 판단을 목적지·시간·좌석 선택부터 **결제 버튼까지 중단 없이 그대로 실행(자동 클릭)한다** — Mock이 아니라 코레일+ 앱의 실제 결제 플로우이며, 실제 금전이 이동한다.
 
 ---
 
@@ -72,8 +70,8 @@ flowchart LR
 4. **요청 전송**: Context Builder가 이를 `DecideRequest`(§6)로 직렬화해 `POST /api/v1/decide` 호출.
 5. **백엔드 처리** (§5 상세): 세션 history 로드 → LLM 호출(5초 타임아웃) → 로깅 → 세션 갱신 → `DecideResponse` 반환.
 6. **실행**: 응답 `status`가 `CONTINUE`면 Android가 `target_node_id`에 해당하는 노드에 즉시 `performAction(ACTION_CLICK)` 또는 `setText`를 실행한다 — **AI가 직접 클릭한다.**
-7. **반복**: 화면이 바뀌면(`TYPE_WINDOW_STATE_CHANGED`/`TYPE_WINDOW_CONTENT_CHANGED`, 디바운스 적용) 3~6단계를 반복 — 출발역 → 도착역 → 날짜 → 조회 → 열차 선택 → 좌석 선택 → 결제까지 **중단 없이** 자동 진행.
-8. **Mock 결제 완료**: 결제 단계에 도달하면 실제 PG/코레일 API를 호출하지 않고, `PaymentMockRepository.completePayment()` 같은 로컬 코루틴이 1~2초 delay 후 더미 카드번호(`**** **** **** 1234`)와 "예매가 완료되었습니다" 화면을 자동으로 보여준다. 화면에는 반드시 "Demo/테스트" 표기를 남긴다.
+7. **반복**: 화면이 바뀌면(`TYPE_WINDOW_STATE_CHANGED`/`TYPE_WINDOW_CONTENT_CHANGED`, 디바운스 적용) 3~6단계를 반복 — 출발역 → 도착역 → 날짜 → 조회 → 열차 선택 → 좌석 선택 → **결제 버튼**까지 **중단 없이** 자동 진행.
+8. **실제 결제 완료**: 코레일+ 앱에 사용자가 사전 등록해 둔 실제 결제수단으로 그 앱 자체의 결제 화면이 그대로 실행되고, AI가 마지막 결제 확정 버튼까지 `performAction(ACTION_CLICK)`으로 누른다. 우리 backend/Android는 별도 PG 연동을 만들지 않는다 — 코레일+ 앱이 원래 갖고 있는 결제 흐름을 그대로 자동 조작할 뿐이다. **실제 금전이 이동한다.**
 
 ---
 
@@ -89,8 +87,7 @@ flowchart LR
 | 3 | AI 없이 문자열 매칭 → `performAction(ACTION_CLICK)` 자동 클릭 검증 | 지정 문자열 버튼이 실제로 눌림 |
 | 4 | 클릭 가능/의미있는 노드만 추려 session-local id 부여 → `goal + elements` JSON을 백엔드로 전송, 응답 수신 | 백엔드 응답으로 `target_node_id` 수신 확인 |
 | 5 | 화면 변경 이벤트(디바운스) 감지 시 3~4 반복하는 루프 | 여러 단계 연속 자동 진행 |
-| 6 | 결제 단계까지 자동 클릭 계속 진행 (중단 없음) | 결제 단계까지 도달 |
-| 6-1 | Mock 결제수단 연동·완료 화면 자동 전환 (로컬 상태 전환만, 실 API 호출 없음) | "결제 완료" 더미 화면 표시 |
+| 6 | 결제 버튼까지 자동 클릭 계속 진행 (중단 없음) — 코레일+ 앱 자체의 실제 결제 화면·확정 버튼을 그대로 자동 조작 | 실제 결제 완료까지 도달 |
 | 7 | (필요시) 좌석맵 등 텍스트 노드 없는 UI에 대해 Screenshot + Vision fallback | 접근성 라벨 없는 UI에서도 진행 가능 |
 
 **필수 AndroidManifest 권한/선언 (현재 전부 없음)**: `INTERNET`, `BIND_ACCESSIBILITY_SERVICE`를 갖는 `<service>`, (Wake Word 상시 감지용) `FOREGROUND_SERVICE`, 오버레이용 `SYSTEM_ALERT_WINDOW`.
@@ -151,7 +148,7 @@ class DecideResponse(BaseModel):
     reason: str | None = None
 ```
 
-> ⚠️ **`docs/planning/01`, `05`는 `status`에 `PAYMENT_GATE`가 있다고 가정하고, `action`(click/setText)·`value`(setText용 입력값) 필드도 요구한다.** `PAYMENT_GATE`는 결제 전 사용자 확인을 전제로 한 이전 설계이며 현재는 폐기됐다(§7 참고) — 다시 넣지 말 것. 다만 `action`/`value` 필드는 자동 클릭·자동 입력에 여전히 필요하며 현재 스키마에는 없다 — §9 참고.
+> ⚠️ **`docs/planning/05`는 응답에 `action`(click/setText)·`value`(setText용 입력값) 필드도 요구한다.** 결제 확인 게이트(`PAYMENT_GATE`)는 이전 설계였으나 폐기됐고 관련 문서도 갱신 완료됐다 — 다시 넣지 말 것. 다만 `action`/`value` 필드는 자동 클릭·자동 입력에 여전히 필요하며 현재 스키마에는 없다 — §9 참고.
 
 **설정값** (`backend/config.py`, 하드코딩 금지 — 여기서만 관리):
 
@@ -170,7 +167,7 @@ SENSITIVE_KEYWORDS: list[str] = ["송금","이체","결제","계좌","비밀번�
 3. 신뢰도 게이트: LLM confidence가 임계값(`0.6`) 미만이면 `status=ASK_USER`로 강제 override
 4. 민감정보 마스킹: 비밀번호/주민번호/계좌번호 등은 LLM 전송 전 서버단에서 마스킹
 
-**결제 실행도 자동화 대상이다** — 목적지~좌석 선택뿐 아니라 결제까지 AI가 중단 없이 자동 진행한다(`CLAUDE.md` §4-1). 결제 대기 확인 화면·사용자 확인 탭·자체 오버레이를 통한 결제 게이트는 더 이상 두지 않는다. 다만 실제 PG/코레일 결제 확정 API 연동은 여전히 스코프 밖이며, 결제는 Android 로컬 `PaymentMockRepository` Mock으로만 완료된다.
+**결제 실행도 자동화 대상이다** — 목적지~좌석 선택뿐 아니라 결제까지 AI가 중단 없이 자동 진행한다(`CLAUDE.md` §4-1). 결제 대기 확인 화면·사용자 확인 탭·결제 게이트는 두지 않는다. Mock이 아니라 **코레일+ 앱의 실제 결제 화면을 그대로 자동 조작하며, 실제 금전이 이동한다.** 우리 backend/Android가 PG사 API를 직접 호출하는 별도 연동은 만들지 않는다 — 어디까지나 그 앱 자체의 기존 결제 흐름을 접근성으로 클릭해서 타는 것이다. 이 리스크(오판으로 인한 잘못된 결제, 매크로 탐지, Play 정책 위반 가능성)는 `docs/planning/01` §리스크에 기록돼 있으니 데모/테스트 시 반드시 숙지할 것.
 
 ---
 
@@ -189,7 +186,6 @@ SENSITIVE_KEYWORDS: list[str] = ["송금","이체","결제","계좌","비밀번�
 | `backend/services/ai_client.py`가 `MockAIClient` 고정 (`target_node_id=1, confidence=0.99, CONTINUE` 하드코딩) | 실제 LLM 미연동. Anthropic API 연동 필요 | AI/LLM |
 | `android/`가 기본 템플릿 상태 — AccessibilityService·자동클릭·네트워킹·Wake Word 전부 미구현 | §4 Phase 0~7 처음부터 구현 | Android |
 | `request.history`가 요청에는 있지만 서버가 무시하고 자체 세션 history로 덮어씀 | 의도된 동작인지 재확인 | 백엔드 |
-| `docs/planning/01`, `05`가 여전히 결제 게이트(사용자 확인 탭, `PAYMENT_GATE` 상태, 자체 오버레이)를 전제로 서술됨 | 완전 자동결제 방향(`CLAUDE.md` §4-1, 이 문서 §7)과 어긋남. `docs/planning` 갱신 필요 | 기획/전체 |
 
 ---
 
