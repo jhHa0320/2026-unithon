@@ -2,6 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!--
+      Android 11+(API 30+) 패키지 가시성 제한 — targetSdk 37인 이 앱은 <queries>에 명시하지
+      않으면 다른 앱을 "설치 안 됨"으로 취급한다(getLaunchIntentForPackage가 null 반환).
+      카카오톡을 우리 앱이 직접 실행하려면 반드시 필요하다.
+    -->
+    <queries>
+        <package android:name="com.kakao.talk" />
+    </queries>
+
     <!-- 멤버 A(Infra/Voice/UX) 담당 권한. Accessibility 서비스 자체 선언은 멤버 C가 service/ 아래에 추가 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />

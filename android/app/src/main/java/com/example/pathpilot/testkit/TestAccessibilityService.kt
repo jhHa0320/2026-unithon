@@ -72,10 +72,13 @@ class TestAccessibilityService : AccessibilityService() {
         if (!isSessionActive) {
             isSessionActive = true
             sessionId = UUID.randomUUID().toString()
-            goal = DEFAULT_GOAL
+            // MainActivity에서 사용자가 입력한 목표가 있으면 그걸 쓰고, 없으면(예: adb로 바로
+            // 카톡을 켠 경우) 하드코딩된 기본 목표로 폴백한다.
+            goal = GoalHolder.consume() ?: DEFAULT_GOAL
             overlay.showOrUpdate("테스트 시작: $goal")
         }
 
+        Log.d(TAG, "a11y 이벤트: type=${AccessibilityEvent.eventTypeToString(event?.eventType ?: 0)} source=${event?.className}")
         scheduleCollectAndDecide()
     }
 
@@ -101,7 +104,10 @@ class TestAccessibilityService : AccessibilityService() {
 
     /** 현재 화면을 ElementDTO 목록으로 만들어 /decide를 호출한다. */
     private fun collectAndDecide(userSpeech: String?) {
-        if (isRequestInFlight) return
+        if (isRequestInFlight) {
+            Log.d(TAG, "이전 요청 진행 중 — 이번 스캔은 건너뜀")
+            return
+        }
         val root = rootInActiveWindow ?: return
 
         nodeMap.clear()
@@ -204,7 +210,21 @@ class TestAccessibilityService : AccessibilityService() {
             Log.w(TAG, "target node를 찾지 못함 (target_node_id=${response.target_node_id})")
             return
         }
-        when (response.action_type) {
+
+        // 서버 응답이 오는 사이 화면이 바뀌면 이 노드는 이미 죽은 참조일 수 있다.
+        // refresh()는 시스템에 재동기화를 시도하고, 원본 뷰가 사라졌으면 false를 반환한다 —
+        // "클릭이 조용히 실패해서 제자리걸음" 가설을 확인하기 위한 핵심 로그.
+        val refreshed = node.refresh()
+        Log.i(
+            TAG,
+            "액션 실행: id=${response.target_node_id} type=${response.action_type} " +
+                "class=${node.className} text=${node.text} refreshed=$refreshed",
+        )
+        if (!refreshed) {
+            Log.w(TAG, "노드 refresh 실패 — 화면이 이미 바뀌어 이 노드는 무효화됐을 가능성 높음")
+        }
+
+        val actionResult = when (response.action_type) {
             ActionType.CLICK -> node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             ActionType.SET_TEXT -> {
                 val args = Bundle().apply {
@@ -215,6 +235,11 @@ class TestAccessibilityService : AccessibilityService() {
                 }
                 node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
             }
+            else -> false
+        }
+        Log.i(TAG, "performAction 결과: $actionResult (id=${response.target_node_id})")
+        if (!actionResult) {
+            Log.w(TAG, "performAction 실패 — 이 스텝은 화면에 아무 영향을 못 줬을 것")
         }
     }
 

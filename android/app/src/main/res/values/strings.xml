@@ -9,4 +9,10 @@
 
     <!-- 멤버 A: 개인 테스트용 AccessibilityService (카카오톡 사진 전송 시나리오) -->
     <string name="test_accessibility_service_description">테스트용: 카카오톡 화면을 읽고 AI 지시에 따라 클릭합니다.</string>
+
+    <!-- 멤버 A: MainActivity 테스트 진입점 (자연어 목표 입력 -> 카톡 실행) -->
+    <string name="main_goal_label">무엇을 도와드릴까요?</string>
+    <string name="main_goal_hint">예: 카톡으로 최원호한테 제일 최근에 찍은사진 보내줘</string>
+    <string name="main_button_start">시작</string>
+    <string name="main_status_idle">대기 중</string>
 </resources>
