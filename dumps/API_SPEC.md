@@ -17,8 +17,8 @@ AI 에이전트가 현재 화면을 보고 다음 행동을 결정하는 핵심 
 | 필드 | 타입 | 필수 | 설명 |
 |---|---|---|---|
 | `session_id` | String | ✅ | 세션 식별자. 같은 목표를 수행하는 동안 동일 값 유지 |
-| `goal` | String | ✅ | 사용자 최종 목표 (예: "서울에서 부산 가는 KTX 예매해줘") |
-| `app_package` | String | ✅ | 현재 앱 패키지명 (예: `com.korail.talk`) |
+| `goal` | String | ✅ | 사용자 최종 목표 (예: "엄마한테 사진 보내줘") |
+| `app_package` | String | ✅ | 현재 앱 패키지명 (예: `com.kakao.talk`) |
 | `elements` | List | ✅ | 화면 노드 목록. **비어 있으면 422** |
 | `user_speech` | String \| null | ❌ | 사용자의 음성 응답(STT 결과). `ASK_USER`에 답할 때만 채움 |
 | `history` | List \| null | ❌ | 이전 단계 요약. **생략 시 서버가 `session_id`로 자동 조회하므로 보통 null로 두면 됨** |
@@ -76,14 +76,20 @@ AI 에이전트가 현재 화면을 보고 다음 행동을 결정하는 핵심 
 | 4xx | `HTTP_ERROR` | 잘못된 경로/메서드, body 파싱 실패 |
 | 500 | `INTERNAL_ERROR` | 서버 내부 오류 |
 
-### 💳 결제 단계에 대한 주의
+### ⚠️ 전송 단계에 대한 주의
 
-서버는 결제·인증 관련 요소를 **차단하지 않습니다.** 에이전트가 결제 버튼까지 직접 클릭해
-예매를 완결하는 것이 제품 목표이므로, `"결제하기"` 같은 노드도 그대로 `CLICK` 대상이 됩니다.
+서버는 전송·인증 관련 요소를 **차단하지 않습니다.** 에이전트가 전송 버튼까지 직접 클릭해
+작업을 완결하는 것이 제품 목표이므로, `"전송"` 같은 노드도 그대로 `CLICK` 대상이 됩니다.
 실행을 멈추는 것은 `confidence` 게이트(`ASK_USER`)와 응답 검증(`UNSUPPORTED`)뿐입니다.
 
 개인정보(전화번호·계좌번호·주민번호 패턴)는 LLM 전송 전 서버가 마스킹하지만,
 **노드 자체는 제거하지 않으므로** 조작 대상으로는 여전히 유효합니다.
+
+**단, 잘못된 사람에게 전송된 사진은 되돌릴 수 없습니다.** 그래서 수신자가 확정되지
+않으면 서버가 진행하지 않고 `ASK_USER`를 반환합니다. 목표가 "엄마"라고만 했는데
+화면에 `김엄마`·`엄마♥`가 함께 있으면 둘 중 하나를 고르지 않고 되묻습니다.
+클라이언트는 `ASK_USER`를 받으면 **반드시 사용자 답변을 받아 재요청**해야 하며,
+임의로 진행하면 안 됩니다.
 
 ---
 
@@ -94,10 +100,10 @@ AI 에이전트가 현재 화면을 보고 다음 행동을 결정하는 핵심 
 ```json
 // 요청
 {
-  "session_id": "demo", "goal": "서울에서 부산 가는 KTX 예매해줘",
-  "app_package": "com.korail.talk", "user_speech": null, "history": null,
+  "session_id": "demo", "goal": "엄마한테 사진 보내줘",
+  "app_package": "com.kakao.talk", "user_speech": null, "history": null,
   "elements": [{
-    "id": 1, "text": "승차권 예매", "content_description": null,
+    "id": 1, "text": "김엄마", "content_description": null,
     "class_name": "android.widget.Button", "clickable": true,
     "bounds": [0, 0, 300, 120]
   }]
@@ -105,7 +111,7 @@ AI 에이전트가 현재 화면을 보고 다음 행동을 결정하는 핵심 
 // 응답
 {
   "target_node_id": 1, "action_type": "CLICK", "input_value": null,
-  "instruction": "node 1 클릭", "voice_message": "승차권 예매를 누를게요.",
+  "instruction": "node 1 클릭", "voice_message": "김엄마 님 대화방을 열게요.",
   "confidence": 0.9, "status": "CONTINUE", "reason": null
 }
 ```
@@ -115,9 +121,9 @@ AI 에이전트가 현재 화면을 보고 다음 행동을 결정하는 핵심 
 ```json
 // 응답
 {
-  "target_node_id": 7, "action_type": "SET_TEXT", "input_value": "서울",
+  "target_node_id": 7, "action_type": "SET_TEXT", "input_value": "김엄마",
   "instruction": "입력 필드(node 7)에 텍스트 입력",
-  "voice_message": "출발역을 입력할게요.",
+  "voice_message": "이름을 검색할게요.",
   "confidence": 0.9, "status": "CONTINUE", "reason": null
 }
 ```
@@ -147,13 +153,15 @@ uvicorn backend.main:app --reload --port 8000
 - **Swagger UI: http://127.0.0.1:8000/docs** ← 스키마 확인·수동 테스트는 여기가 가장 편합니다
 - 안드로이드 에뮬레이터에서 호스트 접근: `http://10.0.2.2:8000`
 
-> 현재 서버는 **규칙 기반 Mock**(`MockAIClient`)으로 응답합니다. 계약은 확정이므로 통신 코드를
-> 지금 붙여도 되며, Gemini 연동(작업 B-2) 시 응답 *내용*만 똑똑해지고 *형식*은 바뀌지 않습니다.
+> **`.env`에 `GEMINI_API_KEY`가 있으면 실제 Gemini(`gemini-3.6-flash`)로 판단합니다.**
+> 키가 없으면 규칙 기반 `MockAIClient`로 자동 폴백하므로 키 없이도 서버가 뜹니다.
+> 어느 쪽이든 **응답 형식은 동일**하니 클라이언트 코드는 그대로 씁니다.
+> 실측 응답 시간은 콜당 약 2.4초입니다.
 
-### Mock 서버의 현재 동작 규칙
+### Mock 폴백 시 동작 규칙 (키가 없을 때)
 
 1. `user_speech`에 부정어(아니/취소/그만…)가 있으면 → `DONE`
 2. `user_speech`가 긍정/부정 판정 불가면 → `ASK_USER`
-3. `class_name`에 `EditText`가 포함된 첫 clickable 노드 → `SET_TEXT` (`input_value: "서울"` 고정)
+3. `class_name`에 `EditText`가 포함된 첫 clickable 노드 → `SET_TEXT` (`input_value`는 goal 앞부분)
 4. 그 외 첫 clickable 노드 → `CLICK`
 5. clickable 노드가 하나도 없으면 → `ASK_USER`
