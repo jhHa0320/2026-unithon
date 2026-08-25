@@ -36,7 +36,10 @@ import java.util.UUID
  * 알려진 한계 (테스트 용도라 감수):
  * - [nodeMap]에 담아둔 AccessibilityNodeInfo는 서버 응답이 오는 사이 화면이 바뀌면 무효화될 수
  *   있다. performAction이 조용히 실패하면 이게 원인일 가능성이 높다.
- * - 세션은 카카오톡 화면에 들어올 때마다 새로 시작되고, 목표 문장은 [DEFAULT_GOAL]로 고정한다.
+ * - 세션은 카카오톡 화면에 들어올 때마다 새로 시작된다. 목표 문장은 [pendingGoal]이 미리 세팅돼
+ *   있으면 그걸 쓰고(예: 웨이크업 트리거가 goal을 이미 알고 있는 경우), 없으면 매번 "무엇을
+ *   도와드릴까요?"를 TTS로 묻고 STT로 받은 답을 목표로 삼는다 — [startSessionAndCaptureGoal] 참고.
+ *   [DEFAULT_GOAL]은 그 STT마저 실패했을 때만 쓰는 최후의 fallback이다.
  */
 class TestAccessibilityService : AccessibilityService() {
 
@@ -52,6 +55,10 @@ class TestAccessibilityService : AccessibilityService() {
     private var isSessionActive = false
     private var isRequestInFlight = false
     private var consecutiveAskUserCount = 0
+
+    /** "무엇을 도와드릴까요?" 답변을 기다리는 동안, 그 사이 들어오는 화면 변경 이벤트가 아직
+     * 정해지지 않은 goal로 collectAndDecide를 먼저 실행해버리지 않도록 막는 가드. */
+    private var isAwaitingGoal = false
 
     /** ASK_USER 답변의 종류. CLAUDE.md §5-1 참고: 정보 제공형은 goal에 누적, 확인 응답은 user_speech로 일회성 전달. */
     private enum class AnswerType { INFO, CONFIRMATION }
@@ -69,6 +76,10 @@ class TestAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val eventPackage = event?.packageName?.toString()
         if (eventPackage != TARGET_PACKAGE) {
+            if (isAwaitingGoal) {
+                isAwaitingGoal = false
+                voice.stopListening()
+            }
             isSessionActive = false
             return
         }
@@ -76,12 +87,50 @@ class TestAccessibilityService : AccessibilityService() {
         if (!isSessionActive) {
             isSessionActive = true
             sessionId = UUID.randomUUID().toString()
-            goal = DEFAULT_GOAL
             consecutiveAskUserCount = 0
-            overlay.showOrUpdate("테스트 시작: $goal")
+            startSessionAndCaptureGoal()
+            return
         }
 
+        if (isAwaitingGoal) return
         scheduleCollectAndDecide()
+    }
+
+    /**
+     * 새 세션을 시작할 때 목표를 정한다. [pendingGoal]이 미리 세팅돼 있으면(예: adb 테스트로 goal을
+     * 지정해서 트리거한 경우) 그대로 쓰고, 없으면 — 즉 카카오톡이 방금 막 떠서 아직 아무 목표도
+     * 모르는 보통의 경우 — 바로 "무엇을 도와드릴까요?"를 TTS로 묻고 마이크를 켜서 답변을 목표로 삼는다.
+     * 답변을 기다리는 동안 [isAwaitingGoal]을 세워서, 그 사이 들어오는 화면 변경 이벤트가
+     * 아직 정해지지 않은 goal로 먼저 요청을 쏘지 않게 막는다.
+     */
+    private fun startSessionAndCaptureGoal() {
+        val preset = pendingGoal
+        pendingGoal = null
+        if (preset != null) {
+            goal = preset
+            overlay.showOrUpdate("테스트 시작: $goal")
+            scheduleCollectAndDecide()
+            return
+        }
+
+        isAwaitingGoal = true
+        overlay.showOrUpdate("무엇을 도와드릴까요?")
+        voice.askAndListen(
+            question = "무엇을 도와드릴까요?",
+            onAnswer = { answer ->
+                isAwaitingGoal = false
+                goal = answer
+                overlay.showOrUpdate("목표: $goal")
+                scheduleCollectAndDecide()
+            },
+            onError = { err ->
+                isAwaitingGoal = false
+                Log.w(TAG, "목표 음성 인식 실패($err), 기본 목표로 대체")
+                goal = DEFAULT_GOAL
+                overlay.showOrUpdate("음성 인식 실패, 기본 목표로 진행합니다.")
+                scheduleCollectAndDecide()
+            },
+        )
     }
 
     override fun onInterrupt() {
@@ -294,5 +343,15 @@ class TestAccessibilityService : AccessibilityService() {
             "아니", "아니요", "아니오", "노", "안돼", "안 돼", "싫어",
             "취소", "취소해줘", "취소해주세요", "그만", "그만해줘",
         )
+
+        /**
+         * [com.example.pathpilot.wakeup.WakeAndLaunchActivity]가 화면을 깨우고 카카오톡을 실행하기
+         * 직전에 세팅해두는 이번 세션의 목표 문장(선택 사항). 다음 [onAccessibilityEvent]가 새 세션을
+         * 열 때 한 번 소비하고 null로 되돌린다 — 같은 프로세스 안에서만 오가므로 Intent extra 대신
+         * 정적 필드로 간단히 넘긴다. null이면 [startSessionAndCaptureGoal]이 대신 TTS로 되물어서
+         * 목표를 구한다 — 보통의 경우(웨이크업 트리거가 goal을 미리 모르는 경우) 여기에 해당한다.
+         */
+        @Volatile
+        var pendingGoal: String? = null
     }
 }

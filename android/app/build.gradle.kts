@@ -29,6 +29,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+
+    buildFeatures {
+        // wakeup/WakeTriggerReceiver가 릴리스 빌드에서 스스로 무력화되도록 BuildConfig.DEBUG를 쓴다.
+        buildConfig = true
+    }
 }
 
 dependencies {

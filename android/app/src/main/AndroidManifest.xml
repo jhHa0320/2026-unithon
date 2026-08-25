@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 화면 꺼짐 상태에서 깨워서 카카오톡을 실행하는 wakeup/ 흐름 전용 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:allowBackup="true"
@@ -48,6 +50,34 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/test_accessibility_service_config" />
         </service>
+
+        <!--
+          화면 꺼짐/잠금 상태에서 화면을 깨우고 카카오톡으로 이동하는 UI 없는 중계 Activity.
+          showWhenLocked/turnScreenOn은 API 27+에서만 매니페스트 속성이 먹으므로, API 26 폴백은
+          WakeAndLaunchActivity 코드 쪽 WindowManager 플래그로 처리한다.
+        -->
+        <activity
+            android:name=".wakeup.WakeAndLaunchActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:taskAffinity=""
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!--
+          테스트용 트리거 — exported=true는 adb로 직접 쏴보기 위한 설정이지만, 릴리스 빌드에서는
+          WakeTriggerReceiver.onReceive()의 BuildConfig.DEBUG 체크로 스스로 무력화된다.
+          진짜 트리거(웨이크워드 감지 등)가 생기면 이 리시버 자체를 삭제할 것.
+        -->
+        <receiver
+            android:name=".wakeup.WakeTriggerReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.example.pathpilot.action.WAKE_AND_LAUNCH_KAKAO" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>
