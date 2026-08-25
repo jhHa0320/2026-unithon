@@ -5,6 +5,7 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -33,10 +34,15 @@ import java.util.UUID
  * 이 파일과 `res/xml/test_accessibility_service_config.xml`, Manifest의 관련 `<service>`
  * 블록을 지운다 (docs/ARCHITECTURE.md §2).
  *
+ * [TARGET_PACKAGES]에 등록된 앱(카카오톡/카카오택시)만 대상으로 한다 — 목록 밖 앱은 이벤트
+ * 자체가 안 들어온다(`res/xml/test_accessibility_service_config.xml`의 packageNames가 OS
+ * 레벨 필터). 어떤 앱을 켤지는 [com.example.pathpilot.wakeup.WakeAndLaunchActivity]가 goal
+ * 문장을 보고 미리 정해서 카카오톡/카카오택시 중 하나를 실행해준다.
+ *
  * 알려진 한계 (테스트 용도라 감수):
  * - [nodeMap]에 담아둔 AccessibilityNodeInfo는 서버 응답이 오는 사이 화면이 바뀌면 무효화될 수
  *   있다. performAction이 조용히 실패하면 이게 원인일 가능성이 높다.
- * - 세션은 카카오톡 화면에 들어올 때마다 새로 시작된다. 목표 문장은 [pendingGoal]이 미리 세팅돼
+ * - 세션은 [TARGET_PACKAGES] 중 하나의 화면에 들어올 때마다 새로 시작된다. 목표 문장은 [pendingGoal]이 미리 세팅돼
  *   있으면 그걸 쓰고(예: 웨이크업 트리거가 goal을 이미 알고 있는 경우), 없으면 매번 "무엇을
  *   도와드릴까요?"를 TTS로 묻고 STT로 받은 답을 목표로 삼는다 — [startSessionAndCaptureGoal] 참고.
  *   [DEFAULT_GOAL]은 그 STT마저 실패했을 때만 쓰는 최후의 fallback이다.
@@ -53,6 +59,9 @@ class TestAccessibilityService : AccessibilityService() {
     private val debounceHandler = Handler(Looper.getMainLooper())
     private var pendingCollect: Runnable? = null
 
+    /** 지금 디바운스 중인 이벤트 burst가 언제 시작됐는지. [scheduleCollectAndDecide] 참고. */
+    private var firstEventInBurstAt: Long? = null
+
     /** "분석 중" 스피너를 3초 이상 걸릴 때만 보여주기 위한 지연 타이머. 빠르게 끝나는 대부분의
      * 요청(2~3초대)에서는 깜빡임 없이 조용히 지나가고, 느려질 때만 사용자에게 알린다. */
     private val analyzingIndicatorHandler = Handler(Looper.getMainLooper())
@@ -63,6 +72,10 @@ class TestAccessibilityService : AccessibilityService() {
     private var isSessionActive = false
     private var isRequestInFlight = false
     private var consecutiveAskUserCount = 0
+
+    /** 지금 세션이 진행 중인 앱. [TARGET_PACKAGES] 중 하나이며, 실제로 이벤트가 들어온 값으로
+     * 채워진다 — 하드코딩된 단일 상수가 아니라 "지금 어느 앱 화면인지"를 그대로 반영한다. */
+    private var currentPackage: String = TARGET_PACKAGES.first()
 
     /** "무엇을 도와드릴까요?" 답변을 기다리는 동안, 그 사이 들어오는 화면 변경 이벤트가 아직
      * 정해지지 않은 goal로 collectAndDecide를 먼저 실행해버리지 않도록 막는 가드. */
@@ -78,12 +91,12 @@ class TestAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         voice = VoiceInteractionManager(this)
         overlay = StatusOverlayManager(this)
-        Log.i(TAG, "TestAccessibilityService connected (target=$TARGET_PACKAGE)")
+        Log.i(TAG, "TestAccessibilityService connected (targets=$TARGET_PACKAGES)")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val eventPackage = event?.packageName?.toString()
-        if (eventPackage != TARGET_PACKAGE) {
+        if (eventPackage == null || eventPackage !in TARGET_PACKAGES) {
             if (isAwaitingGoal) {
                 isAwaitingGoal = false
                 voice.stopListening()
@@ -92,9 +105,14 @@ class TestAccessibilityService : AccessibilityService() {
             return
         }
 
-        Log.d(TAG, "a11y 이벤트: type=${AccessibilityEvent.eventTypeToString(event?.eventType ?: 0)} source=${event?.className}")
+        Log.d(TAG, "a11y 이벤트: type=${AccessibilityEvent.eventTypeToString(event?.eventType ?: 0)} source=${event?.className} package=$eventPackage")
 
-        if (!isSessionActive) {
+        // 지원 앱 목록 안에서 다른 앱으로 바뀐 경우(예: 카카오톡 -> 카카오택시)도 새 세션으로
+        // 취급한다 — 이전 세션의 goal/이력이 엉뚱한 앱에 이어붙는 걸 막는다.
+        val packageChanged = eventPackage != currentPackage
+        currentPackage = eventPackage
+
+        if (!isSessionActive || packageChanged) {
             isSessionActive = true
             sessionId = UUID.randomUUID().toString()
             consecutiveAskUserCount = 0
@@ -150,18 +168,35 @@ class TestAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         pendingCollect?.let { debounceHandler.removeCallbacks(it) }
+        firstEventInBurstAt = null
         cancelAnalyzingIndicator()
         serviceScope.cancel()
         overlay.hide()
         voice.shutdown()
     }
 
-    /** 화면 변경 이벤트가 연속으로 들어와도 마지막 한 번만 처리한다 (디바운스). */
+    /**
+     * 화면 변경 이벤트가 연속으로 들어와도 마지막 한 번만 처리한다 (디바운스).
+     *
+     * 카카오택시의 지도 화면처럼 콘텐츠가 초당 5~6번씩 계속 바뀌는 화면에서는, 매 이벤트마다
+     * 디바운스 타이머가 리셋되기만 해서 **500ms의 조용한 순간이 영영 안 오면 collectAndDecide가
+     * 한 번도 실행되지 못하는** starvation이 실기기에서 재현됐다(2026-08-25, "목적지 입력 후
+     * 진행 안 됨"). 그래서 이 burst가 시작된 후 [MAX_BURST_WAIT_MS]가 지나면, 계속 이벤트가
+     * 들어오는 중이어도 강제로 한 번 실행한다.
+     */
     private fun scheduleCollectAndDecide() {
+        val now = SystemClock.uptimeMillis()
+        val burstStart = firstEventInBurstAt ?: now.also { firstEventInBurstAt = it }
+        val elapsedSinceBurstStart = now - burstStart
+        val delay = if (elapsedSinceBurstStart >= MAX_BURST_WAIT_MS) 0L else DEBOUNCE_MS
+
         pendingCollect?.let { debounceHandler.removeCallbacks(it) }
-        val runnable = Runnable { collectAndDecide(userSpeech = null) }
+        val runnable = Runnable {
+            firstEventInBurstAt = null
+            collectAndDecide(userSpeech = null)
+        }
         pendingCollect = runnable
-        debounceHandler.postDelayed(runnable, DEBOUNCE_MS)
+        debounceHandler.postDelayed(runnable, delay)
     }
 
     /** 현재 화면을 ElementDTO 목록으로 만들어 /decide를 호출한다. */
@@ -214,7 +249,7 @@ class TestAccessibilityService : AccessibilityService() {
         val request = DecideRequest(
             session_id = sessionId,
             goal = goal,
-            app_package = TARGET_PACKAGE,
+            app_package = currentPackage,
             elements = elements,
             user_speech = userSpeech,
         )
@@ -380,9 +415,17 @@ class TestAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "TestA11yService"
-        private const val TARGET_PACKAGE = "com.kakao.talk"
+
+        /** 이 서비스가 반응하는 앱 목록. `res/xml/test_accessibility_service_config.xml`의
+         * packageNames와 반드시 같이 맞춰야 한다 — 저쪽에 없는 패키지를 여기 추가해도 이벤트
+         * 자체가 시스템에서 걸러져서 안 들어온다. */
+        private val TARGET_PACKAGES = setOf("com.kakao.talk", "com.kakao.taxi")
         private const val DEFAULT_GOAL = "카카오톡에서 가장 최근에 찍은 사진 보내줘"
         private const val DEBOUNCE_MS = 500L
+
+        /** 이벤트가 쉬지 않고 계속 들어와도(예: 지도 화면 애니메이션) 이 시간이 지나면 강제로
+         * 한 번 스캔한다 — 디바운스 starvation 방지. */
+        private const val MAX_BURST_WAIT_MS = 1500L
 
         /** 이보다 오래 걸리는 요청에만 "분석 중" 스피너를 보여준다. */
         private const val ANALYZING_INDICATOR_DELAY_MS = 3000L

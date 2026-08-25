@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   멤버 A(나) 개인 테스트용 AccessibilityService 설정.
-  카카오톡 하나만 대상으로 제한해서, 실수로 다른 앱(특히 실제 결제가 자동 실행되는 코레일+)에
-  적용되지 않도록 한다. 멤버 C가 정식 서비스를 만들면 이 파일과 TestAccessibilityService는
+  카카오톡/카카오택시 두 앱만 대상으로 제한해서, 실수로 다른 앱(특히 실제 결제가 자동 실행되는
+  코레일+)에 적용되지 않도록 한다. 여기 목록은 TestAccessibilityService.TARGET_PACKAGES와
+  반드시 같이 맞춰야 한다 — 여기 없는 패키지는 코드에서 아무리 허용해도 이벤트 자체가 시스템
+  레벨에서 걸러진다. 멤버 C가 정식 서비스를 만들면 이 파일과 TestAccessibilityService는
   지운다 — docs/ARCHITECTURE.md §2 참고.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
@@ -10,5 +12,5 @@
     android:accessibilityFeedbackType="feedbackGeneric"
     android:canRetrieveWindowContent="true"
     android:notificationTimeout="300"
-    android:packageNames="com.kakao.talk"
+    android:packageNames="com.kakao.talk,com.kakao.taxi"
     android:description="@string/test_accessibility_service_description" />

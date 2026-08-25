@@ -9,6 +9,7 @@
     -->
     <queries>
         <package android:name="com.kakao.talk" />
+        <package android:name="com.kakao.taxi" />
     </queries>
 
     <!-- 멤버 A(Infra/Voice/UX) 담당 권한. Accessibility 서비스 자체 선언은 멤버 C가 service/ 아래에 추가 -->
