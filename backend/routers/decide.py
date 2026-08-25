@@ -153,7 +153,14 @@ async def decide(
 
 
 def _history_summary(response: DecideResponse) -> str:
-    """다음 턴의 LLM 프롬프트에 넣을 한 줄 요약. 화면 원문 텍스트는 담지 않는다."""
-    if response.target_node_id is None:
-        return f"[{response.status}] {response.instruction}"
-    return f"[{response.status}] node={response.target_node_id} action={response.action_type}"
+    """다음 턴의 LLM 프롬프트에 넣을 한 줄 요약. 화면 원문 텍스트는 담지 않는다.
+
+    target_node_id가 있는 스텝도 반드시 instruction(LLM이 남긴 자연어 근거, 예: "최원호 님에게
+    사진을 보내기 위해 전송 버튼을 클릭합니다")을 써야 한다 — "node=29 action=CLICK" 같은 번호만
+    남기면, node_id는 화면을 스캔할 때마다 1부터 다시 매기는 임시 번호라 다음 턴에는 완전히 다른
+    요소를 가리킨다. 그러면 LLM이 "직전에 전송 버튼을 눌렀다"는 사실 자체를 다음 턴에 알 방법이
+    없어서, 이미 완료된 절차를 계속 반복 실행하는 사고로 이어졌다(2026-08-25 실기기 재현).
+    instruction은 LLM이 만든 요약 문장이라 화면 원문(text/content_description)을 그대로 담지
+    않으므로 이 함수의 "원문 미포함" 원칙과도 어긋나지 않는다.
+    """
+    return f"[{response.status}] {response.instruction}"

@@ -5,7 +5,11 @@ from threading import Lock
 from backend.config import get_settings
 from backend.schemas.request import HistoryEntry
 
-MAX_HISTORY = 3
+
+# 카톡 사진 전송(첨부 열기 -> 미디어 키보드 -> 사진 선택 -> 전송) 같은 4~5단계 흐름 전체가 창
+# 안에 남아 있어야 LLM이 "이미 전송했다"를 history로 알아챌 수 있다. 3이면 전송 직전 단계가
+# 밀려나 완료 판단 근거가 사라지는 사고가 있었다(2026-08-25).
+MAX_HISTORY = 5
 
 
 @dataclass
