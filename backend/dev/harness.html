@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>에이전트 루프 하네스</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#ffffff; --ink:#14171a; --muted:#6b7280; --line:#e3e6ea;
+    --accent:#2563eb; --rule:#0f9d58; --llm:#7c3aed; --warn:#b45309; --danger:#c0392b;
+    --screen:#f2f4f7; --node:#ffffff; --nodeline:#d7dbe0; --target:#fde68a;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --bg:#0e1116; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e; --line:#2a313a;
+      --accent:#589bff; --rule:#3fb950; --llm:#a371f7; --warn:#d29922; --danger:#f85149;
+      --screen:#0b0e13; --node:#1c232c; --nodeline:#2f3843; --target:#5c4813;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0e1116; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e; --line:#2a313a;
+    --accent:#589bff; --rule:#3fb950; --llm:#a371f7; --warn:#d29922; --danger:#f85149;
+    --screen:#0b0e13; --node:#1c232c; --nodeline:#2f3843; --target:#5c4813;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Pretendard","Malgun Gothic",system-ui,sans-serif;
+    font-size:14px;line-height:1.5}
+  header{padding:14px 18px;border-bottom:1px solid var(--line);background:var(--panel)}
+  h1{margin:0 0 2px;font-size:16px;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:12px}
+  .wrap{display:flex;gap:16px;padding:16px;align-items:flex-start;flex-wrap:wrap}
+  .col-phone{flex:0 0 320px}
+  .col-log{flex:1 1 420px;min-width:320px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .panel h2{margin:0 0 10px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+
+  /* ---- phone ---- */
+  .phone{background:#000;border-radius:26px;padding:9px;box-shadow:0 8px 28px rgba(0,0,0,.22)}
+  .screen{position:relative;width:302px;height:654px;background:var(--screen);
+    border-radius:18px;overflow:hidden}
+  .statusbar{position:absolute;top:0;left:0;right:0;height:22px;display:flex;
+    align-items:center;justify-content:space-between;padding:0 12px;font-size:10px;
+    color:var(--muted);border-bottom:1px solid var(--line)}
+  .node{position:absolute;background:var(--node);border:1px solid var(--nodeline);
+    border-radius:6px;font-size:11px;padding:3px 6px;overflow:hidden;
+    display:flex;align-items:center;cursor:default;transition:background .15s,border-color .15s}
+  .node.tappable{cursor:pointer}
+  .node.tappable:hover{border-color:var(--accent)}
+  .node.anon{background:repeating-linear-gradient(45deg,var(--node),var(--node) 5px,var(--nodeline) 5px,var(--nodeline) 6px);
+    color:var(--muted);justify-content:center;font-size:9px}
+  .node.target{background:var(--target);border-color:var(--warn);font-weight:600}
+  .node .nid{font-family:var(--mono);font-size:9px;color:var(--muted);margin-right:5px;flex:0 0 auto}
+  .empty{position:absolute;inset:22px 0 0;display:flex;align-items:center;justify-content:center;
+    color:var(--muted);font-size:12px;text-align:center;padding:0 24px}
+
+  /* ---- controls ---- */
+  label{display:block;font-size:11px;color:var(--muted);margin:10px 0 4px}
+  input[type=text],textarea{width:100%;padding:8px 10px;border:1px solid var(--line);
+    border-radius:8px;background:var(--bg);color:var(--ink);font-family:inherit;font-size:13px}
+  textarea{font-family:var(--mono);font-size:11px;resize:vertical}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  button{border:1px solid var(--line);background:var(--panel);color:var(--ink);
+    padding:8px 13px;border-radius:8px;font:inherit;font-size:13px;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button:disabled{opacity:.45;cursor:not-allowed}
+
+  /* ---- stats ---- */
+  .stats{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+  .stat{flex:1 1 88px;background:var(--bg);border:1px solid var(--line);
+    border-radius:9px;padding:8px 10px}
+  .stat b{display:block;font-size:19px;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .stat span{font-size:10px;color:var(--muted)}
+
+  /* ---- log ---- */
+  .log{max-height:560px;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+  .step{border:1px solid var(--line);border-radius:9px;padding:9px 11px;background:var(--bg)}
+  .step .top{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:5px}
+  .badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;
+    border:1px solid currentColor;letter-spacing:.02em}
+  .b-rule{color:var(--rule)} .b-llm{color:var(--llm)}
+  .b-CONTINUE{color:var(--accent)} .b-DONE{color:var(--rule)}
+  .b-ASK_USER{color:var(--warn)} .b-CONFIRM_REQUIRED{color:var(--danger)}
+  .b-UNSUPPORTED{color:var(--muted)}
+  .n{font-family:var(--mono);font-size:10px;color:var(--muted)}
+  .say{margin-top:4px;padding-left:9px;border-left:2px solid var(--line);color:var(--ink)}
+  .meta{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:4px}
+  .ask{margin-top:12px;padding:11px;border:1px solid var(--warn);border-radius:9px;background:var(--bg)}
+  .ask.confirm{border-color:var(--danger)}
+  .ask p{margin:0 0 8px;font-weight:600}
+  .banner{padding:9px 12px;border-radius:9px;font-size:12px;margin-bottom:12px;
+    border:1px solid var(--warn);color:var(--ink);background:var(--bg)}
+  .hint{font-size:11px;color:var(--muted);margin-top:6px}
+  details{margin-top:12px} summary{cursor:pointer;font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>에이전트 루프 하네스</h1>
+  <div class="sub">가상 화면을 실제 <code>POST /api/v1/decide</code>에 흘려보내며 판단·규칙·게이트를 눈으로 확인한다 · 개발 전용</div>
+</header>
+
+<div class="wrap">
+  <!-- ============ PHONE ============ -->
+  <div class="col-phone">
+    <div class="panel">
+      <h2>화면 <span id="screenName" class="n"></span></h2>
+      <div class="phone"><div class="screen" id="screen">
+        <div class="statusbar"><span id="pkg">—</span><span>12:30</span></div>
+        <div class="empty" id="emptyMsg">홈 화면<br>아직 앱을 실행하지 않았다</div>
+      </div></div>
+      <div class="hint">노드를 클릭하면 그 화면으로 직접 이동한다(수동 조작).</div>
+    </div>
+  </div>
+
+  <!-- ============ LOG ============ -->
+  <div class="col-log">
+    <div class="panel">
+      <div id="banner"></div>
+
+      <label for="goal">사용자 발화 (goal)</label>
+      <input type="text" id="goal" value="카톡으로 영희한테 방금 찍은 사진 보내줘">
+
+      <div class="row">
+        <button class="primary" id="run">AI 자동 실행</button>
+        <button id="step1">한 스텝만</button>
+        <button id="reset">처음으로</button>
+      </div>
+
+      <div id="askBox"></div>
+
+      <div class="stats" style="margin-top:16px">
+        <div class="stat"><b id="sSteps">0</b><span>스텝</span></div>
+        <div class="stat"><b id="sLLM">0</b><span>LLM 호출</span></div>
+        <div class="stat"><b id="sRule">0</b><span>규칙이 차단</span></div>
+        <div class="stat"><b id="sNodes">—</b><span>노드 필터</span></div>
+      </div>
+
+      <h2>스텝 로그</h2>
+      <div class="log" id="log"></div>
+
+      <details>
+        <summary>실제 기기 덤프 붙여넣기 (uiautomator dump XML)</summary>
+        <div class="hint">실기기에서 <code>adb shell uiautomator dump</code>로 뽑은 XML을 넣으면 그 화면 그대로 판단시켜 볼 수 있다. 프롬프트 튜닝용.</div>
+        <textarea id="xml" rows="5" placeholder="&lt;hierarchy ...&gt;"></textarea>
+        <div class="row"><button id="loadXml">이 화면으로 판단시키기</button></div>
+      </details>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================================
+// 가상 화면 픽스처 — 테스트 픽스처일 뿐 백엔드 로직이 아니다.
+// 백엔드/프롬프트에는 어떤 앱 이름도 들어 있지 않다 (CLAUDE.md §12).
+// 좌표는 1080x2340 기준이며 화면 렌더링 시 스케일된다.
+// ============================================================================
+const W = 1080, H = 2340;
+const APPS = [
+  {package:"com.kakao.talk", label:"카카오톡"},
+  {package:"com.nhn.android.search", label:"네이버"},
+  {package:"com.google.android.apps.photos", label:"Google 포토"},
+];
+
+const E = (id, text, o={}) => ({
+  id, text, content_description:o.desc ?? null,
+  class_name:o.cls ?? "android.widget.TextView",
+  clickable:o.click ?? true, editable:o.edit ?? false,
+  scrollable:o.scroll ?? false, password:false, bounds:o.b,
+});
+
+const SCREENS = {
+  launcher: { name:"홈", pkg:null, elements:[], on:{} },
+
+  friends: { name:"친구 목록", pkg:"com.kakao.talk", on:{101:"search"},
+    elements:[
+      E(101, null, {desc:"검색", cls:"android.widget.ImageButton", b:[840,120,960,240]}),
+      E(102, "친구", {b:[60,120,300,240]}),
+      E(110, "김철수", {b:[60,320,1020,470]}),
+      E(111, "박민수", {b:[60,480,1020,630]}),
+      E(112, "이수진", {b:[60,640,1020,790]}),
+      E(120, "채팅", {b:[300,2150,500,2290]}),
+    ]},
+
+  search: { name:"검색", pkg:"com.kakao.talk", onSetText:{201:"results"},
+    elements:[
+      E(201, "이름 또는 전화번호 검색", {cls:"android.widget.EditText", edit:true, b:[60,140,880,270]}),
+      E(202, "취소", {b:[900,140,1020,270]}),
+    ]},
+
+  results: { name:"검색 결과", pkg:"com.kakao.talk", on:{301:"chat"},
+    elements:[
+      E(201, "영희", {cls:"android.widget.EditText", edit:true, b:[60,140,880,270]}),
+      E(301, "영희", {b:[60,330,1020,480]}),
+      E(302, "영희네 가게", {b:[60,490,1020,640]}),
+    ]},
+
+  chat: { name:"대화방", pkg:"com.kakao.talk", on:{402:"picker"},
+    elements:[
+      E(400, "영희", {click:false, b:[180,120,600,230]}),
+      E(401, "메시지 입력", {cls:"android.widget.EditText", edit:true, b:[180,2100,860,2240]}),
+      E(402, null, {desc:"첨부", cls:"android.widget.ImageButton", b:[40,2100,160,2240]}),
+      E(403, null, {desc:"전송", cls:"android.widget.ImageButton", b:[880,2100,1020,2240]}),
+    ]},
+
+  // 사진 그리드 — 셀에 라벨이 없다. position_hint가 여기서 일한다.
+  picker: { name:"앨범 (라벨 없음)", pkg:"com.kakao.talk",
+    on:Object.fromEntries([501,502,503,504,505,506].map(i=>[i,"chatPhoto"])),
+    elements:[
+      E(500, "최근 항목", {click:false, b:[60,120,600,230]}),
+      ...[0,1,2,3,4,5].map(i=>E(501+i, null, {cls:"android.widget.ImageView",
+        b:[40+(i%3)*350, 300+Math.floor(i/3)*350, 340+(i%3)*350, 600+Math.floor(i/3)*350]})),
+      E(510, null, {cls:"androidx.recyclerview.widget.RecyclerView", click:false, scroll:true, b:[0,290,1080,1300]}),
+    ]},
+
+  chatPhoto: { name:"전송 대기", pkg:"com.kakao.talk", on:{603:"sent"},
+    elements:[
+      E(600, "영희", {click:false, b:[180,120,600,230]}),
+      E(601, "사진 1장 첨부됨", {click:false, b:[180,1700,900,1830]}),
+      // 사진을 붙인 뒤의 다음 행동은 전송이다. 입력창은 편집 가능하지만 클릭 후보는 아니다.
+      E(602, "메시지 입력", {cls:"android.widget.EditText", click:false, edit:true, b:[180,2100,860,2240]}),
+      E(603, null, {desc:"전송", cls:"android.widget.ImageButton", b:[880,2100,1020,2240]}),
+    ]},
+
+  sent: { name:"전송 완료", pkg:"com.kakao.talk", on:{},
+    elements:[
+      E(700, "영희", {click:false, b:[180,120,600,230]}),
+      E(701, "사진을 보냈습니다", {click:false, b:[500,1700,1020,1830]}),
+      E(702, "메시지 입력", {cls:"android.widget.EditText", edit:true, b:[180,2100,860,2240]}),
+    ]},
+};
+
+// ============================================================================
+const $ = id => document.getElementById(id);
+let state, custom = null;
+
+function reset(){
+  state = { key:"launcher", session:"harness-"+Math.random().toString(36).slice(2,9),
+            steps:0, llm:0, rule:0, busy:false, last:null };
+  custom = null;
+  $("log").innerHTML = ""; $("askBox").innerHTML = "";
+  ["sSteps","sLLM","sRule"].forEach(i=>$(i).textContent="0");
+  $("sNodes").textContent = "—";
+  render();
+}
+const cur = () => custom ?? SCREENS[state.key];
+
+function render(){
+  const s = cur();
+  $("screenName").textContent = "· " + s.name;
+  $("pkg").textContent = s.pkg ?? "(앱 없음)";
+  const screen = $("screen");
+  [...screen.querySelectorAll(".node")].forEach(n=>n.remove());
+  const empty = $("emptyMsg");
+  empty.style.display = s.elements.length ? "none" : "flex";
+  if(!s.elements.length) return;
+
+  const box = screen.getBoundingClientRect();
+  const sx = (box.width||302)/W, sy = ((box.height||654)-22)/H;
+  for(const el of s.elements){
+    const [l,t,r,b] = el.bounds;
+    const d = document.createElement("div");
+    d.className = "node";
+    const label = el.text || el.content_description;
+    if(!label) d.classList.add("anon");
+    if(state.last && state.last.target_node_id === el.id) d.classList.add("target");
+    const next = nextOf(s, el.id);
+    if(next) d.classList.add("tappable");
+    d.style.left = (l*sx)+"px"; d.style.top = (22+t*sy)+"px";
+    d.style.width = ((r-l)*sx)+"px"; d.style.height = Math.max(14,(b-t)*sy)+"px";
+    d.innerHTML = `<span class="nid">${el.id}</span>` +
+      (label ? escapeHtml(label) : "이름 없음");
+    if(next) d.onclick = () => manualTap(el.id);
+    screen.appendChild(d);
+  }
+}
+const escapeHtml = t => t.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+// 이 노드를 누르면 갈 화면. 클릭 전환(on)과 텍스트 입력 전환(onSetText) 모두 처리한다.
+const nextOf = (s, id) => (s.on && s.on[id]) || (s.onSetText && s.onSetText[id]) || null;
+
+// 수동 조작: 화면을 옮긴 뒤 그 화면에 대해 백엔드 판단을 한 번 받아본다.
+// (Mock 모드에서도 CONFIRM_REQUIRED 게이트 같은 동작을 눈으로 확인할 수 있게 하는 경로)
+async function manualTap(id){
+  const s = cur();
+  const next = nextOf(s, id);
+  if(!next || state.busy) return;
+  state.key = next; custom = null; state.last = null;
+  logNote(`수동 조작 → ${SCREENS[state.key].name}`);
+  render();
+  state.busy = true;
+  try {
+    const d = await once();
+    if(d.status === "ASK_USER" || d.status === "CONFIRM_REQUIRED") showAsk(d);
+  } catch(e){ logNote("요청 실패: " + e.message); }
+  finally { state.busy = false; }
+}
+
+async function callDecide(){
+  const s = cur();
+  const body = {
+    session_id: state.session, goal: $("goal").value,
+    app_package: s.pkg, elements: s.elements,
+    installed_apps: s.pkg ? null : APPS, history: null,
+  };
+  const res = await fetch("/api/v1/decide", {
+    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  return { data, rule: res.headers.get("X-Rule-Hit") || "",
+           llm: res.headers.get("X-LLM-Called") === "1",
+           nodes: res.headers.get("X-Elements") || "" , status: res.status };
+}
+
+function logNote(text){
+  const d = document.createElement("div");
+  d.className = "step"; d.innerHTML = `<span class="n">${escapeHtml(text)}</span>`;
+  $("log").prepend(d);
+}
+
+function logStep(n, r){
+  const d = r.data;
+  const el = document.createElement("div");
+  el.className = "step";
+  const who = r.llm ? `<span class="badge b-llm">LLM</span>`
+                    : `<span class="badge b-rule">RULE ${escapeHtml(r.rule||"cache")}</span>`;
+  const tgt = d.target_node_id !== null ? ` <span class="n">#${d.target_node_id}</span>` : "";
+  const val = d.value ? ` <span class="n">"${escapeHtml(d.value)}"</span>` : "";
+  el.innerHTML =
+    `<div class="top"><span class="n">${n}</span>${who}` +
+    `<span class="badge b-${d.status}">${d.status}</span>` +
+    `<b>${d.action}</b>${tgt}${val}</div>` +
+    `<div class="say">🔊 ${escapeHtml(d.instruction)}</div>` +
+    `<div class="meta">노드 ${escapeHtml(r.nodes)}${d.reason ? " · " + escapeHtml(d.reason) : ""}</div>`;
+  $("log").prepend(el);
+}
+
+function applyAction(d){
+  const s = cur();
+  if(d.action === "LAUNCH_APP"){
+    const k = Object.keys(SCREENS).find(k => SCREENS[k].pkg === d.value && k !== "launcher");
+    state.key = k || "friends"; custom = null; return true;
+  }
+  if(d.action === "SET_TEXT" && s.onSetText && s.onSetText[d.target_node_id]){
+    state.key = s.onSetText[d.target_node_id]; custom = null; return true;
+  }
+  if(d.action === "CLICK" && s.on && s.on[d.target_node_id]){
+    state.key = s.on[d.target_node_id]; custom = null; return true;
+  }
+  return false;
+}
+
+function showAsk(d){
+  const confirm = d.status === "CONFIRM_REQUIRED";
+  $("askBox").innerHTML =
+    `<div class="ask ${confirm?"confirm":""}">
+       <p>🔊 ${escapeHtml(d.instruction)}</p>
+       <input type="text" id="answer" placeholder="${confirm?"예: 응, 보내줘":"음성으로 답한 내용"}">
+       <div class="row">
+         <button class="primary" id="sendAnswer">답변하고 계속</button>
+         ${confirm?`<button id="denyAnswer">아니요</button>`:""}
+       </div>
+       <div class="hint">답변은 <code>goal</code> 뒤에 이어붙어 같은 session_id로 재요청된다.</div>
+     </div>`;
+  const submit = txt => {
+    if(!txt.trim()) return;
+    $("goal").value = $("goal").value.trim() + " " + txt.trim();
+    $("askBox").innerHTML = ""; loop();
+  };
+  $("sendAnswer").onclick = () => submit($("answer").value);
+  $("answer").onkeydown = e => { if(e.key==="Enter") submit($("answer").value); };
+  if(confirm) $("denyAnswer").onclick = () => submit("아니요, 하지 마세요.");
+}
+
+async function once(){
+  state.steps++;
+  const r = await callDecide();
+  state.last = r.data;
+  if(r.llm) state.llm++; else state.rule++;
+  $("sSteps").textContent = state.steps;
+  $("sLLM").textContent = state.llm;
+  $("sRule").textContent = state.rule;
+  $("sNodes").textContent = r.nodes || "—";
+  logStep(state.steps, r);
+  render();
+  return r.data;
+}
+
+async function loop(auto=true){
+  if(state.busy) return;
+  state.busy = true; $("run").disabled = true; $("step1").disabled = true;
+  try{
+    for(let i=0;i<15;i++){
+      const d = await once();
+      if(d.status === "ASK_USER" || d.status === "CONFIRM_REQUIRED"){ showAsk(d); break; }
+      if(d.status === "DONE" || d.status === "UNSUPPORTED") break;
+      if(!applyAction(d)){
+        if(d.action === "NONE"){ await new Promise(r=>setTimeout(r,400)); continue; }
+        logNote("이 화면 픽스처에 해당 전환이 정의되어 있지 않다 — 수동으로 노드를 눌러 진행할 것");
+        break;
+      }
+      if(!auto) break;
+      await new Promise(r=>setTimeout(r,350));
+    }
+  } catch(e){
+    logNote("요청 실패: " + e.message + " — 백엔드가 떠 있는지 확인할 것");
+  } finally {
+    state.busy = false; $("run").disabled = false; $("step1").disabled = false;
+  }
+}
+
+// ---- 실기기 덤프 로드 -------------------------------------------------------
+function loadXml(){
+  const text = $("xml").value.trim();
+  if(!text) return;
+  let doc;
+  try{ doc = new DOMParser().parseFromString(text, "text/xml"); }
+  catch(e){ logNote("XML 파싱 실패"); return; }
+  const nodes = [...doc.querySelectorAll("node")];
+  if(!nodes.length){ logNote("node를 찾지 못했다 — uiautomator dump 결과가 맞는지 확인"); return; }
+  const parseB = s => { const m = s.match(/-?\d+/g) || []; return m.slice(0,4).map(Number); };
+  let pkg = null, els = [];
+  nodes.forEach((n,i) => {
+    const cls = n.getAttribute("class") || "";
+    const b = parseB(n.getAttribute("bounds") || "");
+    if(b.length !== 4) return;
+    pkg = pkg || n.getAttribute("package");
+    els.push({ id:i, text:n.getAttribute("text") || null,
+      content_description:n.getAttribute("content-desc") || null, class_name:cls,
+      clickable:n.getAttribute("clickable")==="true",
+      editable:n.getAttribute("editable")==="true" || /EditText/.test(cls),
+      scrollable:n.getAttribute("scrollable")==="true",
+      password:n.getAttribute("password")==="true", bounds:b });
+  });
+  custom = { name:`실기기 덤프 (${els.length} 노드)`, pkg, elements:els, on:{}, onSetText:{} };
+  state.last = null;
+  logNote(`덤프 로드: ${els.length}개 노드, package=${pkg}`);
+  render(); loop(false);
+}
+
+// ---- 부팅 -------------------------------------------------------------------
+async function boot(){
+  reset();
+  try{
+    const r = await fetch("/api/v1/decide", { method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({session_id:"probe",goal:"probe",app_package:null,
+        elements:[],installed_apps:null,history:null}) });
+    const mock = r.headers.get("X-LLM-Called") === "1";
+    const d = await r.json();
+    if(d.reason === "no installed_apps provided" || d.instruction?.includes("어떤 앱")){
+      $("banner").innerHTML = `<div class="banner"><b>LLM 미연결 — MockAIClient로 동작 중.</b>
+        규칙 계층·안전 게이트는 실제로 동작하지만 화면 탐색 판단은 정확하지 않다.
+        <code>ANTHROPIC_API_KEY</code>를 설정하고 서버를 재시작하면 실제 판단으로 돌아간다.</div>`;
+    }
+  }catch(e){
+    $("banner").innerHTML = `<div class="banner"><b>백엔드에 연결하지 못했다.</b>
+      <code>uvicorn backend.main:app --port 8000</code> 실행 후 새로고침할 것.</div>`;
+  }
+}
+
+$("run").onclick = () => loop(true);
+$("step1").onclick = () => loop(false);
+$("reset").onclick = reset;
+$("loadXml").onclick = loadXml;
+window.addEventListener("resize", render);
+boot();
+</script>
+</body>
+</html>

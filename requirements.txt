@@ -5,3 +5,7 @@ pydantic-settings
 python-dotenv
 pytest
 httpx
+
+# LLM 프로바이더 — 쓰는 쪽만 설치해도 된다 (ai_client.py에서 지연 import)
+google-genai
+anthropic

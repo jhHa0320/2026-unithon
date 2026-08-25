@@ -1,13 +1,31 @@
-from typing import Literal, Optional
+from typing import Literal
+
 from pydantic import BaseModel
 
-class Decision(BaseModel):
-    target_node_id: Optional[str] = None
-    action_type: str  # "CLICK" | "SET_TEXT"
-    input_value: Optional[str] = None
+ActionType = Literal[
+    "CLICK",
+    "SET_TEXT",
+    "LAUNCH_APP",
+    "SCROLL_FORWARD",
+    "SCROLL_BACKWARD",
+    "BACK",
+    "NONE",
+]
+
+StatusType = Literal[
+    "CONTINUE",
+    "DONE",
+    "ASK_USER",
+    "CONFIRM_REQUIRED",
+    "UNSUPPORTED",
+]
+
 
 class DecideResponse(BaseModel):
-    decision: Optional[Decision] = None
-    status: Literal["CONTINUE", "WAIT_FOR_CONFIRM", "DONE", "FAIL"]
-    voice_message: str
+    action: ActionType
+    target_node_id: int | None = None
+    value: str | None = None  # SET_TEXT의 입력값 / LAUNCH_APP의 패키지명
+    instruction: str  # TTS로 읽어줄 문장
     confidence: float
+    status: StatusType
+    reason: str | None = None
