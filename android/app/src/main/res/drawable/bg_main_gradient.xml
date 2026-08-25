@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 앱 화면 공통 배경: 위쪽 거의 흰색 -> 아래쪽 크림색 (InApp 시안) -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <gradient
+        android:angle="270"
+        android:startColor="@color/bg_cream_top"
+        android:endColor="@color/bg_cream_bottom" />
+</shape>

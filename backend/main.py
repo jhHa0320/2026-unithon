@@ -4,6 +4,7 @@ from backend.core.errors import register_exception_handlers
 from backend.core.logging import setup_logging
 from backend.routers.decide import get_ai_client
 from backend.routers.decide import router as decide_router
+from backend.routers.transcribe import router as transcribe_router
 from backend.services.ai_client import AIClient
 
 setup_logging()
@@ -12,6 +13,7 @@ app = FastAPI(title="PathPilot Backend")
 
 register_exception_handlers(app)
 app.include_router(decide_router)
+app.include_router(transcribe_router)
 
 
 @app.get("/health")

@@ -2,4 +2,17 @@
 <resources>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- 시안(screen/*.png)에서 직접 샘플링한 값들. 임의로 바꾸지 말 것 — 디자이너 확정 시안이다. -->
+    <color name="brand_orange">#D06008</color>          <!-- '손자' 칩, 강조 문구 -->
+    <color name="brand_orange_soft">#E07820</color>     <!-- '듣고 있어요' 대형 텍스트 -->
+    <color name="profile_circle">#F5C68F</color>        <!-- 우상단 프로필 원 배경 -->
+    <color name="bg_cream_top">#FFFDFB</color>          <!-- 화면 배경 그라데이션 상단 -->
+    <color name="bg_cream_bottom">#F3DFCC</color>       <!-- 화면 배경 그라데이션 하단 -->
+    <color name="glow_center">#F0D2B4</color>           <!-- 캐릭터 뒤 라디얼 글로우 -->
+    <color name="card_cream">#FEF9F4</color>            <!-- 하단 안내 카드/오버레이 카드 -->
+    <color name="button_green">#30E038</color>          <!-- 오버레이 '중단하기'(일시정지) -->
+    <color name="button_red">#F83838</color>            <!-- 오버레이 '종료하기'(X) -->
+    <color name="text_primary">#1B1B1B</color>
+    <color name="text_secondary">#8A8A8E</color>
 </resources>

@@ -29,6 +29,12 @@ except ImportError:  # pragma: no cover - 패키지 미설치 환경
     genai_errors = None
     genai_types = None
 
+# anthropic도 같은 이유로 선택적 import — 한쪽 SDK가 없어도 서버는 뜬다.
+try:
+    import anthropic
+except ImportError:  # pragma: no cover - 패키지 미설치 환경
+    anthropic = None
+
 
 class AIClientError(Exception):
     """LLM 호출/파싱 실패. 라우터가 잡아 UNSUPPORTED로 응답한다."""
@@ -292,25 +298,148 @@ class GeminiAIClient:
         except json.JSONDecodeError as exc:
             raise AIClientError("LLM 응답이 유효한 JSON이 아닙니다.") from exc
 
-        # 센티널을 계약상의 None으로 되돌린다.
-        target_node_id = (
-            None if decision.target_node_id == NO_TARGET_NODE_ID else decision.target_node_id
-        )
-        action_type = None if decision.action_type == NO_ACTION else decision.action_type
-        input_value = decision.input_value or None
+        return decision_to_response(decision)
 
-        # 조작 대상이 없으면 액션 관련 필드를 모두 비운다.
-        if target_node_id is None:
-            action_type = None
-            input_value = None
 
-        return DecideResponse(
-            target_node_id=target_node_id,
-            action_type=action_type,
-            input_value=input_value,
-            instruction=decision.reasoning,
-            voice_message=decision.voice_message,
-            confidence=decision.confidence,
-            status=decision.status,
-            reason=None,
+class ClaudeAIClient:
+    """Claude Messages API 구현체. `AI_PROVIDER=claude`일 때 쓰는 추론 실험 경로.
+
+    Gemini 구현체와 **같은 프롬프트·같은 응답 스키마**를 쓴다(`prompt.SYSTEM_INSTRUCTION`,
+    `prompt.build_input`, `LLMDecision`). 비교 실험이 목적이라 바뀌는 건 제공자뿐이어야 한다.
+
+    구조화 출력은 SDK의 `messages.parse()`에 맡긴다 — `LLMDecision`을 그대로 넘기면 스키마
+    생성·검증까지 SDK가 처리하고, JSON Schema가 지원하지 않는 제약(`confidence`의 0.0~1.0
+    범위 등)은 SDK가 스키마에서 빼고 클라이언트 쪽에서 검증해 준다. 직접 스키마를 만들어
+    넘기면 그 제약이 그대로 실려 400이 난다.
+
+    사고(thinking) 설정은 일부러 넘기지 않는다. Claude Opus 5는 사고가 기본으로 켜져 있고,
+    깊이는 `output_config.effort`로 조절한다. 명시적으로 끄는 쪽(`{"type": "disabled"}`)은
+    지연을 줄이는 대신 응답에 내부 태그가 새는 등의 부작용이 보고돼 있어, 대신 effort를
+    낮춰서(`CLAUDE_EFFORT=low`) 지연을 줄인다.
+
+    동기 호출이다. 라우터가 asyncio.to_thread로 offload한다.
+    """
+
+    PROVIDER = "claude"
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        effort: str,
+        max_tokens: int,
+        timeout_seconds: float,
+    ) -> None:
+        if anthropic is None:  # pragma: no cover - 패키지 미설치 환경
+            raise AIClientError("anthropic 패키지가 없습니다. pip install anthropic")
+        # timeout은 초 단위(파이썬 SDK 기준). 라우터의 AI_CLIENT_TIMEOUT_SECONDS보다 작아야
+        # HTTP가 먼저 끊기고 to_thread 스레드가 풀린다.
+        self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout_seconds)
+        self._model = model
+        self._effort = effort
+        self._max_tokens = max_tokens
+
+    def decide(
+        self,
+        goal: str,
+        app_package: str,
+        elements: list[ElementDTO],
+        history: list[HistoryEntry] | None,
+        user_speech: str | None = None,
+    ) -> DecideResponse:
+        user_input = prompt.build_input(
+            goal=goal,
+            app_package=app_package,
+            elements=elements,
+            history=history,
+            user_speech=user_speech,
         )
+
+        try:
+            response = self._client.messages.parse(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                system=prompt.SYSTEM_INSTRUCTION,
+                output_config={"effort": self._effort},
+                messages=[{"role": "user", "content": user_input}],
+                output_format=LLMDecision,
+            )
+        except Exception as exc:  # SDK 예외 계층이 넓어 광범위하게 잡고 변환한다
+            raise AIClientError(self._describe_api_error(exc)) from exc
+
+        # 안전 분류기가 요청을 거절하면 HTTP 200에 stop_reason="refusal"로 온다.
+        # content를 먼저 읽으면 비어 있어서 엉뚱한 곳에서 터지므로 여기서 먼저 걸러낸다.
+        if response.stop_reason == "refusal":
+            category = getattr(getattr(response, "stop_details", None), "category", None)
+            raise AIClientError(f"Claude가 요청을 거절했습니다 (category={category})")
+
+        decision = response.parsed_output
+        if decision is None:
+            raise AIClientError("Claude가 스키마에 맞는 응답을 반환하지 않았습니다.")
+
+        self._log_usage(response)
+        return decision_to_response(decision)
+
+    def _log_usage(self, response) -> None:
+        """토큰 사용량을 남긴다. 화면 원문은 포함되지 않으므로 기록해도 안전하다.
+
+        Gemini 경로와 나란히 놓고 보려고 필드 이름을 맞춰 둔다 — 실험의 비교 대상이 이 숫자다.
+        """
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        logger.info(
+            "claude usage",
+            extra={
+                "model": self._model,
+                "effort": self._effort,
+                "input_tokens": getattr(usage, "input_tokens", None),
+                "output_tokens": getattr(usage, "output_tokens", None),
+                "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
+            },
+        )
+
+    def _describe_api_error(self, exc: Exception) -> str:
+        """SDK 예외를 로그용 문자열로 바꾼다. 응답 본문에는 노출하지 않는다(키가 샐 수 있다)."""
+        if anthropic is not None and isinstance(exc, anthropic.APIStatusError):
+            return f"Claude API error {exc.status_code}: {getattr(exc, 'message', exc)}"
+        return f"{type(exc).__name__}: {exc}"
+
+
+def decision_to_response(decision: LLMDecision) -> DecideResponse:
+    """LLM이 채운 [LLMDecision]을 클라이언트 계약([DecideResponse])으로 옮긴다.
+
+    제공자와 무관한 변환이라 모듈 함수로 둔다 — Gemini와 Claude가 같은 규칙을 쓰지 않으면
+    제공자를 바꿨을 때 센티널 처리나 필드 정리가 미묘하게 달라져 비교 실험이 성립하지 않는다.
+    여기서 status를 UNSUPPORTED로 만들지 않는다 — 그 판정은 safety 게이트의 몫이다.
+    """
+    # 센티널을 계약상의 None으로 되돌린다.
+    target_node_id = (
+        None if decision.target_node_id == NO_TARGET_NODE_ID else decision.target_node_id
+    )
+    action_type = None if decision.action_type == NO_ACTION else decision.action_type
+    input_value = decision.input_value or None
+
+    # 조작 대상이 없으면 액션 관련 필드를 모두 비운다.
+    if target_node_id is None:
+        action_type = None
+        input_value = None
+
+    # 반대 방향도 정리한다: action_type이 NONE('조작 없음')인데 target_node_id가 남아 있는
+    # 불일치를 LLM이 실제로 만들어낸다(실기기 관찰). NONE이 명시된 이상 남은 id는 잡동사니로
+    # 보고 버린다 — 여기서 정리하지 않으면 validate_action이 UNSUPPORTED로 강등해, 멀쩡한
+    # DONE/ASK_USER 응답 하나 때문에 세션이 통째로 끝난다.
+    if action_type is None:
+        target_node_id = None
+        input_value = None
+
+    return DecideResponse(
+        target_node_id=target_node_id,
+        action_type=action_type,
+        input_value=input_value,
+        instruction=decision.reasoning,
+        voice_message=decision.voice_message,
+        confidence=decision.confidence,
+        status=decision.status,
+        reason=None,
+    )

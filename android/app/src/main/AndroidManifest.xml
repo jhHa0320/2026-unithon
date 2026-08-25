@@ -30,16 +30,21 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Pathpilot">
+        <!-- 로딩(스플래시) -> MainActivity. 런처 진입점은 여기다 (screen/Loading Screen 시안). -->
         <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:windowSoftInputMode="adjustResize">
+            android:name=".LoadingActivity"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
 
         <!-- exported=true는 adb로 직접 테스트하기 위한 임시 설정. 팀 통합 시 false로 되돌릴 것 -->
         <activity

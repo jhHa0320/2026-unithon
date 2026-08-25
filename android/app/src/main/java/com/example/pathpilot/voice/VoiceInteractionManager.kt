@@ -102,17 +102,22 @@ class VoiceInteractionManager(context: Context) {
         speak(text, onDone)
     }
 
+    /** 발화 id -> 완료 콜백. 리스너는 인스턴스에 하나뿐이라 발화별 콜백은 여기서 찾는다.
+     * QUEUE_ADD로 여러 발화가 큐에 쌓여도 각자의 onDone이 유실되지 않는다.
+     * 메인 스레드(등록)와 TTS 내부 스레드(제거)가 함께 만지므로 동시성 안전 맵을 쓴다. */
+    private val utteranceCallbacks = java.util.concurrent.ConcurrentHashMap<String, () -> Unit>()
+    private var isTtsListenerRegistered = false
+
     /**
-     * 질문/안내 문장을 음성으로 재생한다. [onDone]은 항상 메인 스레드에서, **이번 발화(utteranceId)에
-     * 대한 콜백일 때만** 정확히 한 번 호출된다.
+     * 질문/안내 문장을 음성으로 재생한다. 재생 중인 멘트가 있으면 **끝난 뒤에 이어서** 재생한다
+     * (QUEUE_ADD) — 예전 QUEUE_FLUSH는 스텝이 빠르게 이어질 때 이전 멘트를 중간에 끊어
+     * 안내가 겹치고 잘려 들렸다. [onDone]은 항상 메인 스레드에서, 이번 발화가 실제로 끝났을
+     * 때만 정확히 한 번 호출된다.
      *
-     * `setOnUtteranceProgressListener`는 TextToSpeech 인스턴스 전체에 리스너 하나만 걸리는 API라,
-     * 이전에 재생 중이던 발화가 `QUEUE_FLUSH`로 밀려나면서 뒤늦게 onError/onDone을 보고할 때도
-     * (지금 등록된) 이 리스너가 그걸 받는다. `utteranceId`를 확인하지 않으면 그 "묵은" 콜백까지
-     * [onDone]을 실행시켜서 — 실제로 겪은 버그: `askAndListen`으로 "네, 말씀하세요"를 재생한 직후
-     * `listenOnce`가 16ms 간격으로 두 번 불려서, 먼저 연 마이크 세션이 거의 즉시 "무음"으로 오판되어
-     * 에러 처리(→ 웨이크 루프 재시작)로 빠지고, 그 여파로 방금 막 연 진짜 세션까지 destroy됐다
-     * (2026-08-25 실기기 테스트). 그래서 발화별 id를 비교해서 남의 콜백은 무시한다.
+     * `setOnUtteranceProgressListener`는 TextToSpeech 인스턴스 전체에 하나만 걸리는 API다.
+     * 발화마다 리스너를 덮어쓰면 큐에 남아 있던 앞 발화의 완료 콜백이 유실된다(질문 발화의
+     * onDone이 사라지면 마이크가 영영 안 열린다). 그래서 리스너는 한 번만 등록하고,
+     * 발화별 콜백은 [utteranceCallbacks] 맵으로 관리한다.
      */
     fun speak(text: String, onDone: () -> Unit = {}) {
         val myGeneration = generation
@@ -128,40 +133,45 @@ class VoiceInteractionManager(context: Context) {
             mainHandler.post { if (myGeneration == generation) onDone() }
             return
         }
+        registerTtsListenerOnce(tts)
+
         val utteranceId = UUID.randomUUID().toString()
+        utteranceCallbacks[utteranceId] = { if (myGeneration == generation) onDone() }
+        // 세션 중단/새 세션 시작 시에는 cancelAll()의 tts.stop()이 큐를 통째로 비우고
+        // 콜백 맵도 함께 비우므로, 묵은 멘트가 새 세션으로 넘어가지 않는다.
+        tts.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId)
+    }
+
+    private fun registerTtsListenerOnce(tts: TextToSpeech) {
+        if (isTtsListenerRegistered) return
+        isTtsListenerRegistered = true
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(id: String?) {}
+
             override fun onDone(id: String?) {
-                if (id != utteranceId) return
-                mainHandler.post { if (myGeneration == generation) onDone() }
+                val callback = id?.let { utteranceCallbacks.remove(it) } ?: return
+                mainHandler.post(callback)
             }
 
             /**
              * **이 override를 지우면 안 된다.** [UtteranceProgressListener.onStop]의 기본 구현은
-             * `onDone(utteranceId)`로 위임한다 — 즉 `tts.stop()`이나 `QUEUE_FLUSH`로 발화를
-             * 죽인 것이 "정상 재생 완료"로 둔갑한다. 그러면 [askAndListen]의 완료 콜백인
-             * [listenOnce]가 실행되어, 방금 끈 마이크가 곧바로 다시 열린다.
-             *
-             * 실제로 겪은 버그(2026-08-26 보고): 질문을 읽어주는 도중 오버레이의
-             * "중단하기"/"종료하기"를 누르면 세션 정리가 `stopListening()` -> `stopSpeaking()`
-             * 순서로 도는데, 마지막 `stopSpeaking()`이 이 경로로 마이크를 되살려서 종료 후에도
-             * 계속 사용자 입력을 대기했다. 호출 순서를 바꿔도 소용없다 — 콜백이
-             * `mainHandler.post`로 넘어가 [stopListening]이 끝난 뒤에 실행되기 때문이다.
-             *
-             * 취소는 완료가 아니므로 여기서는 아무것도 하지 않는다.
+             * `onDone(utteranceId)`로 위임한다 — 즉 `tts.stop()`으로 발화를 죽인 것이
+             * "정상 재생 완료"로 둔갑한다. 그러면 [askAndListen]의 완료 콜백인 [listenOnce]가
+             * 실행되어, 방금 끈 마이크가 곧바로 다시 열린다(2026-08-26 실기기에서 겪은 버그).
+             * 취소는 완료가 아니므로 콜백만 걷어내고 아무것도 실행하지 않는다.
              */
             override fun onStop(id: String?, interrupted: Boolean) {
-                if (id != utteranceId) return
+                id?.let { utteranceCallbacks.remove(it) }
                 Log.d(TAG, "발화 취소됨 (id=$id interrupted=$interrupted) — 후속 동작 없음")
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(id: String?) {
-                if (id != utteranceId) return
-                mainHandler.post { if (myGeneration == generation) onDone() }
+                // 재생 실패도 흐름은 이어가야 한다(질문이 안 읽혔어도 마이크는 열려야 함).
+                val callback = id?.let { utteranceCallbacks.remove(it) } ?: return
+                mainHandler.post(callback)
             }
         })
-        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
     }
 
     /**
@@ -360,8 +370,10 @@ class VoiceInteractionManager(context: Context) {
     fun cancelAll() {
         generation++
         // 아직 재생되지 않은 대기 발화도 취소 대상이다. 안 지우면 TTS 초기화가 늦게 끝날 때
-        // 이미 중단한 세션의 질문이 뒤늦게 흘러나온다.
+        // 이미 중단한 세션의 질문이 뒤늦게 흘러나온다. 큐에 쌓인 발화들의 완료 콜백도 함께
+        // 비운다 — stop()이 발화별 onStop을 안 주는 엔진도 있어 맵에 잔여물이 남을 수 있다.
         pendingUtterance = null
+        utteranceCallbacks.clear()
         stopWakeListening() // 내부에서 stopListening()도 함께 호출한다
         textToSpeech?.stop()
     }

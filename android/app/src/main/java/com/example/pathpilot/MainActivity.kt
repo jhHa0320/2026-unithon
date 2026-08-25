@@ -6,11 +6,14 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.widget.Button
+import android.text.InputType
+import android.view.View
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -23,15 +26,28 @@ import com.example.pathpilot.voice.VoiceInteractionManager
 import com.example.pathpilot.wakeup.WakeAndLaunchActivity
 
 /**
- * 앱을 열면 곧바로 요청을 받지 않고, 웨이크 문구("안녕 " + [WakeWordSettings]에 저장된 이름, 기본값
- * "손자")가 들릴 때까지 대기한다. 웨이크 문구를 들으면 그제서야 "네, 말씀하세요"로 실제 요청을
- * 받고, 받은 요청을 [WakeAndLaunchActivity]에 넘겨 카카오톡 자동화로 이어준다.
+ * 앱 메인 화면 (screen/InApp Main Screen + 마이크사용 감지 시안).
+ *
+ * 두 모드를 오간다:
+ * - **대기 모드**: 손 흔드는 캐릭터와 "안녕, [이름] 라고 말해보세요!" — 웨이크 문구를 기다린다.
+ *   이름 칩을 탭하면 부를 이름을 바꿀 수 있고, 우상단 프로필 원은 권한 화면으로 간다.
+ * - **듣는 중 모드**: 경청하는 캐릭터와 "듣고 있어요…" — 웨이크 문구가 들린 뒤 실제 요청을
+ *   받아쓰는 동안. 인식된 문장이 회색 자막으로 보인다.
+ *
+ * 받은 요청은 [WakeAndLaunchActivity]에 넘겨 카카오톡 자동화로 이어준다.
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var voice: VoiceInteractionManager
+
     private lateinit var statusText: TextView
-    private lateinit var wakeNameInput: EditText
+    private lateinit var chipWakeName: TextView
+    private lateinit var characterImage: ImageView
+    private lateinit var groupIdle: View
+    private lateinit var groupListening: View
+    private lateinit var transcriptText: TextView
+    private lateinit var cardTitle: TextView
+    private lateinit var cardCaption: TextView
 
     /** 접근성 서비스 생존 판정을 잠깐 미뤄서 하기 위한 핸들러. [warnIfAccessibilityServiceIsDead] 참고. */
     private val serviceCheckHandler = Handler(Looper.getMainLooper())
@@ -48,22 +64,20 @@ class MainActivity : AppCompatActivity() {
 
         voice = VoiceInteractionManager(this)
         statusText = findViewById(R.id.text_wake_status)
-        wakeNameInput = findViewById(R.id.input_wake_name)
-        wakeNameInput.setText(WakeWordSettings.getName(this))
+        chipWakeName = findViewById(R.id.chip_wake_name)
+        characterImage = findViewById(R.id.image_character)
+        groupIdle = findViewById(R.id.group_idle)
+        groupListening = findViewById(R.id.group_listening)
+        transcriptText = findViewById(R.id.text_transcript)
+        cardTitle = findViewById(R.id.text_card_title)
+        cardCaption = findViewById(R.id.text_card_caption)
 
-        findViewById<Button>(R.id.button_save_wake_name).setOnClickListener {
-            WakeWordSettings.setName(this, wakeNameInput.text.toString())
-            wakeNameInput.setText(WakeWordSettings.getName(this))
-            Toast.makeText(
-                this,
-                getString(R.string.main_wake_name_saved, WakeWordSettings.getWakePhrase(this)),
-                Toast.LENGTH_SHORT,
-            ).show()
-            restartWakeListening()
-        }
-
-        findViewById<Button>(R.id.button_start_listening).setOnClickListener { restartWakeListening() }
-        findViewById<Button>(R.id.button_open_permissions).setOnClickListener {
+        chipWakeName.text = WakeWordSettings.getName(this)
+        // 이름 칩 탭 -> 부를 이름 바꾸기 (기존 EditText+저장 버튼을 다이얼로그로 대체)
+        chipWakeName.setOnClickListener { showEditWakeNameDialog() }
+        // 캐릭터 탭 -> 듣기 재시작 (기존 "다시 듣기 시작" 버튼 대체)
+        characterImage.setOnClickListener { restartWakeListening() }
+        findViewById<ImageView>(R.id.button_open_permissions).setOnClickListener {
             startActivity(Intent(this, PermissionActivity::class.java))
         }
     }
@@ -82,16 +96,65 @@ class MainActivity : AppCompatActivity() {
         voice.stopWakeListening()
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        serviceCheckHandler.removeCallbacksAndMessages(null)
+        voice.shutdown()
+    }
+
+    // --- 화면 모드 전환 -------------------------------------------------------
+
+    /** 대기 모드: 손 흔드는 캐릭터 + "안녕, [이름] 라고 말해보세요!" */
+    private fun showIdleMode() {
+        characterImage.setImageResource(R.drawable.char_greeting)
+        groupIdle.visibility = View.VISIBLE
+        groupListening.visibility = View.GONE
+        cardTitle.setText(R.string.main_card_idle_title)
+        cardCaption.setText(R.string.main_card_idle_caption)
+    }
+
+    /** 듣는 중 모드: 경청 캐릭터 + "듣고 있어요…" + 인식된 문장 자막 */
+    private fun showListeningMode() {
+        characterImage.setImageResource(R.drawable.char_listening)
+        groupIdle.visibility = View.GONE
+        groupListening.visibility = View.VISIBLE
+        cardTitle.setText(R.string.main_card_listening_title)
+        cardCaption.setText(R.string.main_card_listening_caption)
+    }
+
+    private fun showEditWakeNameDialog() {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT
+            setText(WakeWordSettings.getName(this@MainActivity))
+            setSelection(text.length)
+            hint = getString(R.string.main_wake_name_hint)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.main_edit_wake_name_title)
+            .setView(input)
+            .setPositiveButton(R.string.main_save_wake_name) { _, _ ->
+                WakeWordSettings.setName(this, input.text.toString())
+                chipWakeName.text = WakeWordSettings.getName(this)
+                Toast.makeText(
+                    this,
+                    getString(R.string.main_wake_name_saved, WakeWordSettings.getWakePhrase(this)),
+                    Toast.LENGTH_SHORT,
+                ).show()
+                restartWakeListening()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    // --- 접근성 서비스 생존 확인 ----------------------------------------------
+
     /**
      * "설정에는 켜져 있는데 실제로는 죽어 있는" 접근성 서비스를 감지해 사용자에게 알린다.
      * 알렸으면 true를 돌려준다(= 지금 웨이크 리스닝을 시작할 상황이 아니다).
      *
      * 이 상태가 왜 생기냐면 — 접근성 서비스가 초기화 중 죽거나, **설정 XML의 capability가 바뀐
      * 채로 재설치되면**(예: `canPerformGestures` 추가) 기존 승인으로는 바인딩되지 않는다.
-     * 그런데 `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES` 목록에는 그대로 남아 있어서 설정
-     * 화면은 여전히 "켜짐"으로 보인다. 서비스가 죽으면 오버레이 창도 함께 사라지므로 사용자
-     * 눈에는 "중단/종료 버튼이 없어지고 아무 처리도 안 되는" 상태가 되고, 화면 어디에도 단서가
-     * 없다(2026-08-26 실기기 `dumpsys accessibility`의 Crashed services로 확인).
+     * 서비스가 죽으면 시스템이 접근성 목록에서 항목을 지워버리기도 한다(2026-08-26 실기기 확인).
      * 복구 방법은 접근성 설정에서 껐다 켜는 것뿐이라 그 사실을 그대로 알려준다.
      *
      * **판정을 [SERVICE_CHECK_DELAY_MS]만큼 미루는 이유:** 이 액티비티와 접근성 서비스는 같은
@@ -102,20 +165,16 @@ class MainActivity : AppCompatActivity() {
     private fun warnIfAccessibilityServiceIsDead(): Boolean = when (AccessibilityStatus.current(this)) {
         AccessibilityStatus.State.RUNNING -> false
 
-        // 애초에 켠 적이 없는 정상적인 첫 실행. 권한 화면에서 켜면 된다.
         AccessibilityStatus.State.NEVER_ENABLED -> {
             statusText.text = getString(R.string.main_status_accessibility_off)
             true
         }
 
-        // 켠 적은 있는데 목록에서 사라졌다 = 서비스가 죽으면서 시스템이 해제한 것.
-        // "켜주세요"가 아니라 "풀렸습니다"라고 말해야 사용자가 상황을 납득한다.
         AccessibilityStatus.State.TURNED_OFF_UNEXPECTEDLY -> {
             statusText.text = getString(R.string.main_status_accessibility_turned_off)
             true
         }
 
-        // 목록엔 있는데 아직 응답이 없다. 프로세스가 막 뜨는 중일 수 있으니 한 번 더 확인한다.
         AccessibilityStatus.State.ENABLED_BUT_DEAD -> {
             statusText.text = getString(R.string.main_status_accessibility_checking)
             serviceCheckHandler.removeCallbacksAndMessages(null)
@@ -130,11 +189,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        serviceCheckHandler.removeCallbacksAndMessages(null)
-        voice.shutdown()
-    }
+    // --- 웨이크 리스닝 --------------------------------------------------------
 
     private fun hasMicPermission(): Boolean = ContextCompat.checkSelfPermission(
         this,
@@ -156,13 +211,16 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        showIdleMode()
+        statusText.text = ""
         val wakePhrase = WakeWordSettings.getWakePhrase(this)
-        statusText.text = getString(R.string.main_status_waiting_wake, wakePhrase)
         voice.stopWakeListening()
         voice.startWakeListening(
             wakePhrase = wakePhrase,
             onWake = {
-                statusText.text = getString(R.string.main_status_wake_detected)
+                // 웨이크 문구 인식됨 -> 듣는 중 모드로 전환하고 실제 요청을 받아쓴다.
+                showListeningMode()
+                transcriptText.text = wakePhrase
                 voice.askAndListen(
                     question = getString(R.string.main_prompt_after_wake),
                     onAnswer = { goal -> launchKakaoWithGoal(goal) },
@@ -172,7 +230,7 @@ class MainActivity : AppCompatActivity() {
                     },
                     onListeningChanged = { isListening ->
                         statusText.text = if (isListening) {
-                            getString(R.string.main_status_listening)
+                            ""
                         } else {
                             getString(R.string.main_status_processing)
                         }
@@ -184,14 +242,13 @@ class MainActivity : AppCompatActivity() {
             },
             onHeard = { heard ->
                 // 웨이크 문구가 왜 안 걸리는지(STT가 다르게 알아들었는지) 화면에서 바로 보이게 한다.
-                // 설명 문구 없이 사용자가 실제로 말한 내용만 보여준다.
                 statusText.text = getString(R.string.main_status_heard_not_wake, heard)
             },
         )
     }
 
     private fun launchKakaoWithGoal(goal: String) {
-        statusText.text = getString(R.string.main_status_goal_captured, goal)
+        transcriptText.text = goal
         startActivity(
             Intent(this, WakeAndLaunchActivity::class.java).apply {
                 putExtra(WakeAndLaunchActivity.EXTRA_GOAL, goal)

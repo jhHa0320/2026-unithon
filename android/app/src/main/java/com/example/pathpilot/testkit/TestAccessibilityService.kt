@@ -19,6 +19,7 @@ import com.example.pathpilot.model.DecideResponse
 import com.example.pathpilot.model.DecideStatus
 import com.example.pathpilot.model.ElementDTO
 import com.example.pathpilot.network.RetrofitClient
+import com.example.pathpilot.overlay.CharacterExpression
 import com.example.pathpilot.overlay.StatusOverlayManager
 import com.example.pathpilot.voice.SpeechCommands
 import com.example.pathpilot.voice.SpeechCommands.AnswerType
@@ -116,6 +117,23 @@ class TestAccessibilityService : AccessibilityService() {
      * 경우에는 화면이 같아도 다시 물어야 하므로, 그때는 이 값을 null로 지워 강제로 재판단시킨다.
      */
     private var lastScreenFingerprint: Int? = null
+
+    /** 판단 전에 화면을 아래까지 훑는 프리스크롤이 진행 중인지. 이 동안 들어오는 접근성
+     * 이벤트는 우리가 만든 스크롤의 메아리이므로 새 스캔을 예약하지 않는다. */
+    private var isPrescrolling = false
+    private var pendingPrescrollStep: Runnable? = null
+
+    /** 마지막으로 프리스크롤을 수행한 화면의 지문. 같은 화면에서 스캔이 반복될 때
+     * (워치독 재시도 등) 스크롤 왕복을 다시 하지 않기 위한 기억이다 — 이게 없으면
+     * "복귀 스크롤 -> 이벤트 -> 재스캔 -> 다시 프리스크롤"의 무한 왕복이 생긴다. */
+    private var lastPrescrolledFingerprint: Int? = null
+
+    /**
+     * 민감 입력 화면(결제 비밀번호·생체인증) 때문에 오버레이를 잠시 걷어둔 상태인지.
+     * 이런 화면에서는 하단 카드가 비밀번호 키패드를 가려 사용자가 입력을 못 한다.
+     * 다음 화면으로 넘어가면(민감 요소가 사라지면) 오버레이를 되살린다.
+     */
+    private var isOverlaySuppressed = false
 
     /** 세션 세대 번호. 중단/새 세션마다 올라가고, 서버 응답이 도착했을 때 이 값이 요청 시점과
      * 다르면(= 그 사이 사용자가 중단했거나 세션이 바뀌었으면) 응답을 버린다 — 중단을 눌렀는데
@@ -248,6 +266,11 @@ class TestAccessibilityService : AccessibilityService() {
         pendingCollect = null
         firstEventInBurstAt = null
         pendingRescan = false
+        isPrescrolling = false
+        pendingPrescrollStep?.let { debounceHandler.removeCallbacks(it) }
+        pendingPrescrollStep = null
+        lastPrescrolledFingerprint = null
+        isOverlaySuppressed = false
         settleUntil = 0L
         // 세션이 바뀌면 직전 화면과의 비교는 의미가 없다. 남겨두면 새 세션의 첫 스캔이
         // "직전과 같은 화면"으로 오인돼 통째로 건너뛰어진다.
@@ -292,7 +315,7 @@ class TestAccessibilityService : AccessibilityService() {
             endSession("요청을 인식하지 못했습니다. 필요하시면 중단하기 버튼을 다시 눌러주세요.")
             return
         }
-        overlay.showOrUpdate("무엇을 도와드릴까요?")
+        overlay.showOrUpdate("무엇을 도와드릴까요?", CharacterExpression.CURIOUS)
         val epoch = sessionEpoch
         voice.askAndListen(
             question = if (attempt == 0) "네, 멈췄어요. 무엇을 도와드릴까요?" else "무엇을 도와드릴까요?",
@@ -330,7 +353,7 @@ class TestAccessibilityService : AccessibilityService() {
      * (웨이크 흐름과 동일한 진입점).
      */
     private fun startRequestedGoal(answer: String) {
-        overlay.showOrUpdate("요청: $answer")
+        overlay.showOrUpdate("요청: $answer", CharacterExpression.FOCUSED)
         val target = WakeAndLaunchActivity.resolveTargetPackage(answer)
         pendingGoal = answer
         if (target == currentPackage) {
@@ -373,10 +396,13 @@ class TestAccessibilityService : AccessibilityService() {
 
     /** 세션을 조용히 끝낸다(완료/실패 안내 후). 오버레이는 버튼과 함께 계속 떠 있는다 —
      * 사용자가 언제든 "중단하기"(새 요청)나 "종료하기"를 누를 수 있게. */
-    private fun endSession(message: String) {
+    private fun endSession(
+        message: String,
+        expression: CharacterExpression = CharacterExpression.CURIOUS,
+    ) {
         isSessionActive = false
         disarmWatchdog()
-        overlay.showOrUpdate(message)
+        overlay.showOrUpdate(message, expression)
     }
 
     /**
@@ -430,13 +456,13 @@ class TestAccessibilityService : AccessibilityService() {
         pendingGoal = null
         if (preset != null) {
             goal = preset
-            overlay.showOrUpdate("테스트 시작: $goal")
+            overlay.showOrUpdate("테스트 시작: $goal", CharacterExpression.FOCUSED)
             scheduleCollectAndDecide()
             return
         }
 
         isAwaitingGoal = true
-        overlay.showOrUpdate("무엇을 도와드릴까요?")
+        overlay.showOrUpdate("무엇을 도와드릴까요?", CharacterExpression.CURIOUS)
         val epoch = sessionEpoch
         voice.askAndListen(
             question = "무엇을 도와드릴까요?",
@@ -450,7 +476,7 @@ class TestAccessibilityService : AccessibilityService() {
                     return@askAndListen
                 }
                 goal = answer
-                overlay.showOrUpdate("목표: $goal")
+                overlay.showOrUpdate("목표: $goal", CharacterExpression.FOCUSED)
                 scheduleCollectAndDecide()
             },
             onError = { err ->
@@ -458,7 +484,7 @@ class TestAccessibilityService : AccessibilityService() {
                 isAwaitingGoal = false
                 Log.w(TAG, "목표 음성 인식 실패($err), 기본 목표로 대체")
                 goal = DEFAULT_GOAL
-                overlay.showOrUpdate("음성 인식 실패, 기본 목표로 진행합니다.")
+                overlay.showOrUpdate("잘 못 들었어요. 기본 요청으로 진행할게요.", CharacterExpression.LISTENING)
                 scheduleCollectAndDecide()
             },
         )
@@ -492,6 +518,10 @@ class TestAccessibilityService : AccessibilityService() {
      * 들어오는 중이어도 강제로 한 번 실행한다.
      */
     private fun scheduleCollectAndDecide() {
+        // 프리스크롤이 만드는 스크롤 이벤트는 화면 변화가 아니라 우리 손가락의 메아리다.
+        // 이걸 새 스캔으로 받으면 "스크롤 -> 이벤트 -> 스캔 -> 또 스크롤"로 영영 못 벗어난다.
+        if (isPrescrolling) return
+
         // 화면이 실제로 바뀌었다는 뜻이므로 "진행이 멈췄다" 타이머를 해제하고 재시도 횟수도 되돌린다.
         disarmWatchdog()
         watchdogRetries = 0
@@ -519,6 +549,7 @@ class TestAccessibilityService : AccessibilityService() {
         val clickable: Boolean,
         val scrollable: Boolean,
         val viewId: String?,
+        val isPassword: Boolean,
         val bounds: Rect,
     )
 
@@ -558,15 +589,54 @@ class TestAccessibilityService : AccessibilityService() {
             return
         }
 
+        val candidates = collectCandidates(root)
+
+        // 결제 비밀번호·생체인증처럼 **사용자가 직접 입력해야 하는 화면**에서는 오버레이를
+        // 잠시 걷는다 — 하단 카드가 키패드를 가리면 입력 자체가 불가능하다. 같은 이유로 이
+        // 화면에서는 서버 호출(자동 조작)도 하지 않는다: 비밀번호는 AI가 대신 누를 대상이
+        // 아니다. 화면이 넘어가 민감 요소가 사라지면 오버레이를 되살리고 자동화를 재개한다.
+        if (isSensitiveInputScreen(candidates)) {
+            if (!isOverlaySuppressed) {
+                isOverlaySuppressed = true
+                disarmWatchdog() // 입력을 기다리는 시간은 '정지'가 아니다 — 재스캔 재촉 금지
+                overlay.hide()
+                voice.speak("이 화면에서는 직접 입력해 주세요. 끝나면 이어서 도와드릴게요.")
+                Log.i(TAG, "민감 입력 화면 감지 — 오버레이 숨김, 자동 조작 일시 중지")
+            }
+            return
+        }
+        if (isOverlaySuppressed) {
+            isOverlaySuppressed = false
+            // 직전 화면과 같다는 이유로 재개 판단이 건너뛰어지지 않게 지문을 지운다.
+            lastScreenFingerprint = null
+            overlay.showOrUpdate("이어서 도와드릴게요.", CharacterExpression.FOCUSED)
+            Log.i(TAG, "민감 입력 화면 벗어남 — 오버레이 복원, 자동화 재개")
+        }
+
+        // 판단하기 전에 화면을 아래까지 훑는다: 스크롤 가능한 목록이 있고 이 화면에서 아직
+        // 안 훑었다면, 몇 페이지 앞으로 스크롤하며 요소를 누적 수집한 뒤 원위치로 돌아와서
+        // 전체 목록을 근거로 판단한다 — 첫 화면만 보고 엉뚱한 항목을 고르는 것을 막는다.
+        val prescrollKey = prescrollFingerprintOf(candidates)
+        val scrollContainer = candidates.filter { it.scrollable }
+            .maxByOrNull { it.bounds.width().toLong() * it.bounds.height() }
+        if (scrollContainer != null && prescrollKey != lastPrescrolledFingerprint && !isPrescrolling) {
+            lastPrescrolledFingerprint = prescrollKey
+            startPrescroll(scrollContainer.node, candidates, userSpeech)
+            return
+        }
+
+        proceedToDecision(candidates, userSpeech)
+    }
+
+    /** 화면 전체를 훑어 후보를 모은다. 프리스크롤 중간 단계에서도 재사용한다. */
+    private fun collectCandidates(root: AccessibilityNodeInfo): List<Candidate> {
         val screen = Rect(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
         val candidates = mutableListOf<Candidate>()
 
         fun visit(node: AccessibilityNodeInfo) {
             val text = node.text?.toString()
             // Compose 앱(코레일톡 등)은 clickable 컨테이너에 라벨이 없고 그 안의 클릭 불가
-            // TextView에만 "바로 예매" 같은 텍스트가 있는 경우가 많다. 라벨 없는 clickable
-            // 노드를 그대로 보내면 LLM이 어느 버튼인지 알 수 없어 엉뚱한 요소만 반복
-            // 클릭한다(2026-08-26 코레일톡 실측) — 자손 텍스트를 모아 라벨을 합성한다.
+            // TextView에만 "바로 예매" 같은 텍스트가 있는 경우가 많다 — 자손 텍스트로 라벨을 합성한다.
             val description = node.contentDescription?.toString()
                 ?: if (node.isClickable && text.isNullOrBlank()) synthesizeLabel(node) else null
             if (node.isClickable || node.isScrollable || !text.isNullOrBlank() || !description.isNullOrBlank()) {
@@ -582,6 +652,7 @@ class TestAccessibilityService : AccessibilityService() {
                             clickable = node.isClickable,
                             scrollable = node.isScrollable,
                             viewId = node.viewIdResourceName,
+                            isPassword = node.isPassword,
                             bounds = bounds,
                         ),
                     )
@@ -592,7 +663,98 @@ class TestAccessibilityService : AccessibilityService() {
             }
         }
         visit(root)
+        return candidates
+    }
 
+    /** 프리스크롤 반복 여부를 판정하는 화면 지문. 라벨 구성만 본다(스크롤로 좌표가 변해도 동일). */
+    private fun prescrollFingerprintOf(candidates: List<Candidate>): Int =
+        candidates.joinToString("|") { "${it.text}${it.description}${it.viewId}" }.hashCode()
+
+    /** 프리스크롤 누적 병합용 키. 같은 항목이 스크롤로 좌표만 바뀐 경우를 하나로 본다. */
+    private fun mergeKeyOf(candidate: Candidate): String =
+        "${candidate.viewId}|${candidate.text}|${candidate.description}|${candidate.className}"
+
+    /**
+     * 화면을 아래로 [MAX_PRESCROLL_PAGES]페이지까지 스크롤하며 요소를 누적 수집한 뒤,
+     * 같은 횟수만큼 되돌려 원위치로 복귀하고 나서 판단([proceedToDecision])으로 넘어간다.
+     *
+     * 각 단계 사이에 짧은 대기를 둔다 — 스크롤 직후의 접근성 트리는 아직 이전 프레임일 수 있다.
+     * 진행 중 세션이 중단되면([isStaleEpoch]) 그 자리에서 멈춘다.
+     */
+    private fun startPrescroll(
+        container: AccessibilityNodeInfo,
+        base: List<Candidate>,
+        userSpeech: String?,
+    ) {
+        isPrescrolling = true
+        val epoch = sessionEpoch
+        val merged = LinkedHashMap<String, Candidate>()
+        base.forEach { merged.putIfAbsent(mergeKeyOf(it), it) }
+        Log.i(TAG, "프리스크롤 시작 — 화면 파악을 위해 최대 ${MAX_PRESCROLL_PAGES}페이지 훑기")
+
+        fun finish(forwardCount: Int) {
+            // 원위치 복귀: 내려간 만큼 되올라간다. 복귀가 일부 실패해도 판단은 진행한다 —
+            // LLM은 SCROLL 액션으로 스스로 이동할 수 있다.
+            fun restore(step: Int) {
+                if (!isSessionActive || isStaleEpoch(epoch)) {
+                    isPrescrolling = false
+                    return
+                }
+                if (step >= forwardCount) {
+                    val runnable = Runnable {
+                        isPrescrolling = false
+                        pendingPrescrollStep = null
+                        if (isSessionActive && !isStaleEpoch(epoch)) {
+                            Log.i(TAG, "프리스크롤 완료 — 누적 ${merged.size}개 요소로 판단 진행")
+                            proceedToDecision(merged.values.toList(), userSpeech)
+                        }
+                    }
+                    pendingPrescrollStep = runnable
+                    debounceHandler.postDelayed(runnable, PRESCROLL_SETTLE_MS)
+                    return
+                }
+                container.refresh()
+                container.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+                val runnable = Runnable { restore(step + 1) }
+                pendingPrescrollStep = runnable
+                debounceHandler.postDelayed(runnable, PRESCROLL_STEP_DELAY_MS)
+            }
+            restore(0)
+        }
+
+        fun forward(step: Int) {
+            if (!isSessionActive || isStaleEpoch(epoch)) {
+                isPrescrolling = false
+                return
+            }
+            if (step >= MAX_PRESCROLL_PAGES) {
+                finish(step)
+                return
+            }
+            container.refresh()
+            val scrolled = container.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+            if (!scrolled) {
+                finish(step)
+                return
+            }
+            val runnable = Runnable {
+                if (!isSessionActive || isStaleEpoch(epoch)) {
+                    isPrescrolling = false
+                    return@Runnable
+                }
+                rootInActiveWindow?.let { root ->
+                    collectCandidates(root).forEach { merged.putIfAbsent(mergeKeyOf(it), it) }
+                }
+                forward(step + 1)
+            }
+            pendingPrescrollStep = runnable
+            debounceHandler.postDelayed(runnable, PRESCROLL_STEP_DELAY_MS)
+        }
+        forward(0)
+    }
+
+    /** 수집(및 프리스크롤 누적)이 끝난 후보 목록으로 실제 판단(서버 호출)을 진행한다. */
+    private fun proceedToDecision(candidates: List<Candidate>, userSpeech: String?) {
         val selected = selectElements(candidates)
         if (selected.isEmpty()) {
             // 전환 도중이라 아직 아무것도 안 그려졌을 수 있다. 마찬가지로 재시도에 맡긴다.
@@ -673,6 +835,20 @@ class TestAccessibilityService : AccessibilityService() {
                     if (isSessionActive) scheduleCollectAndDecide()
                 }
             }
+        }
+    }
+
+    /**
+     * 사용자가 직접 입력해야 하는 민감 화면인지. 두 신호 중 하나면 참으로 본다:
+     * 비밀번호 입력 필드([AccessibilityNodeInfo.isPassword])가 있거나, 화면 라벨에
+     * 결제 비밀번호·생체인증 키워드가 보이거나.
+     */
+    private fun isSensitiveInputScreen(candidates: List<Candidate>): Boolean {
+        return candidates.any { candidate ->
+            if (candidate.isPassword) return@any true
+            val label = "${candidate.text.orEmpty()} ${candidate.description.orEmpty()}"
+                .lowercase().replace(" ", "")
+            SENSITIVE_SCREEN_KEYWORDS.any { label.contains(it) }
         }
     }
 
@@ -796,7 +972,7 @@ class TestAccessibilityService : AccessibilityService() {
                 if (response.voice_message.isNotBlank()) {
                     voice.speak(response.voice_message)
                 }
-                overlay.showOrUpdate(response.voice_message.ifBlank { "다음 동작 실행 중" })
+                overlay.showOrUpdate(response.voice_message.ifBlank { "다음 동작 실행 중" }, CharacterExpression.HAPPY)
                 performTargetAction(response)
                 // 클릭/입력 후 화면이 바뀌면 onAccessibilityEvent가 다시 스케줄링한다.
             }
@@ -809,7 +985,7 @@ class TestAccessibilityService : AccessibilityService() {
                 }
                 // 사용자가 답을 고민하는 시간은 "정지"가 아니므로 워치독을 걸지 않는다.
                 disarmWatchdog()
-                overlay.showOrUpdate("답변 대기: ${response.voice_message}")
+                overlay.showOrUpdate("답변 대기: ${response.voice_message}", CharacterExpression.CURIOUS)
                 askUserWithRetry(response.voice_message, attempt = 0)
             }
 
@@ -818,7 +994,7 @@ class TestAccessibilityService : AccessibilityService() {
                 if (response.voice_message.isNotBlank()) {
                     voice.speak(response.voice_message)
                 }
-                endSession("완료: ${response.voice_message}")
+                endSession("완료: ${response.voice_message}", CharacterExpression.HAPPY)
             }
 
             DecideStatus.UNSUPPORTED -> {
@@ -834,7 +1010,13 @@ class TestAccessibilityService : AccessibilityService() {
                 if (response.voice_message.isNotBlank()) {
                     voice.speak(response.voice_message)
                 }
-                endSession("중단됨: ${response.reason ?: response.voice_message}")
+                // reason은 서버 로그/디버깅용 영문 요약이다(계약 §5) — 화면에 내보내면
+                // "중단됨: target_node_id given without action_type" 같은 문구가 사용자에게
+                // 그대로 보인다. 읽어줄 문구는 항상 voice_message다.
+                Log.w(TAG, "UNSUPPORTED로 세션 종료 (reason=${response.reason})")
+                endSession(
+                    response.voice_message.ifBlank { "죄송해요, 이 화면에서는 도와드리기 어려워요." },
+                )
             }
 
             // status는 String이라 when이 exhaustive하지 않다. 계약 밖 값이나 (Gson이 알 수 없는
@@ -863,12 +1045,17 @@ class TestAccessibilityService : AccessibilityService() {
                 if (isStaleEpoch(epoch)) return@askAndListen
                 // 사용자가 방금 뭐라고 답했는지는 항상 화면에 보여야 한다 — 잘 알아들었는지
                 // 스스로 확인할 수 있게.
-                overlay.showOrUpdate("입력: $answer")
+                overlay.showOrUpdate("입력: $answer", CharacterExpression.FOCUSED)
                 routeAnswer(answer)
             },
             onError = { err ->
                 if (isStaleEpoch(epoch)) return@askAndListen
-                overlay.showOrUpdate("답변 인식 실패($err), 다시 물어봅니다.")
+                // 원시 에러 문자열("음성 인식 오류 (code=7)" 등)을 화면에 그대로 내보내면 안 된다 —
+                // 사용자에겐 앱이 고장난 것처럼 보인다. 특히 code=7(NO_MATCH)/6(SPEECH_TIMEOUT)은
+                // "조용해서 못 알아들었다"는 정상 상황이다. 상세는 로그로만 남기고,
+                // 화면·표정은 "다시 여쭤본다"는 자연스러운 흐름으로 보여준다.
+                Log.w(TAG, "답변 인식 실패($err) — 재시도 ${attempt + 1}/$MAX_ASK_RETRIES")
+                overlay.showOrUpdate("잘 못 들었어요. 다시 여쭤볼게요.", CharacterExpression.CURIOUS)
                 askUserWithRetry(question, attempt + 1)
             },
         )
@@ -1006,6 +1193,12 @@ class TestAccessibilityService : AccessibilityService() {
     private fun tapCenter(node: AccessibilityNodeInfo): Boolean {
         val bounds = Rect().also { node.getBoundsInScreen(it) }
         if (bounds.width() <= 0 || bounds.height() <= 0) return false
+        // 화면 밖 좌표를 탭하면 엉뚱한 곳이 눌린다(프리스크롤 누적 요소는 좌표가 낡았을 수 있다).
+        val screen = Rect(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
+        if (!screen.contains(bounds.centerX(), bounds.centerY())) {
+            Log.w(TAG, "좌표 탭 생략 — 대상 중심이 화면 밖 (${bounds.centerX()}, ${bounds.centerY()})")
+            return false
+        }
         val path = Path().apply { moveTo(bounds.exactCenterX(), bounds.exactCenterY()) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, TAP_DURATION_MS))
@@ -1049,7 +1242,7 @@ class TestAccessibilityService : AccessibilityService() {
     private fun notifyAndRetry(message: String) {
         if (!isSessionActive) return
         Log.w(TAG, "일시적 문제 — 복구 시도: $message")
-        overlay.showOrUpdate(message)
+        overlay.showOrUpdate(message, CharacterExpression.LISTENING)
         voice.speak(message)
         armWatchdog(RETRY_DELAY_MS)
     }
@@ -1083,7 +1276,7 @@ class TestAccessibilityService : AccessibilityService() {
          * 자체가 시스템에서 걸러져서 안 들어온다. */
         private val TARGET_PACKAGES = PRIMARY_PACKAGES + AUXILIARY_PACKAGES
         private const val DEFAULT_GOAL = "카카오톡에서 가장 최근에 찍은 사진 보내줘"
-        private const val DEBOUNCE_MS = 500L
+        private const val DEBOUNCE_MS = 650L
 
         /** 이벤트가 쉬지 않고 계속 들어와도(예: 지도 화면 애니메이션) 이 시간이 지나면 강제로
          * 한 번 스캔한다 — 디바운스 starvation 방지. */
@@ -1094,9 +1287,9 @@ class TestAccessibilityService : AccessibilityService() {
          * 이 시간이 끝나기 전에는 [MAX_BURST_WAIT_MS] 상한에 걸려도 스캔하지 않는다 —
          * 전환 애니메이션 한복판의 화면을 읽는 것이 오판의 주된 원인이었다.
          */
-        private const val SETTLE_DELAY_CLICK_MS = 800L
-        private const val SETTLE_DELAY_SET_TEXT_MS = 1_000L
-        private const val SETTLE_DELAY_SCROLL_MS = 1_200L
+        private const val SETTLE_DELAY_CLICK_MS = 1_300L
+        private const val SETTLE_DELAY_SET_TEXT_MS = 1_500L
+        private const val SETTLE_DELAY_SCROLL_MS = 1_800L
 
         /** 이보다 오래 걸리는 요청에만 "분석 중" 스피너를 보여준다. */
         private const val ANALYZING_INDICATOR_DELAY_MS = 3000L
@@ -1115,7 +1308,7 @@ class TestAccessibilityService : AccessibilityService() {
         private const val WATCHDOG_TIMEOUT_MS = 7_000L
 
         /** 일시적 실패(서버 오류·클릭 실패) 후 다시 시도하기까지의 간격. */
-        private const val RETRY_DELAY_MS = 1_500L
+        private const val RETRY_DELAY_MS = 2_000L
 
         /** 워치독이 진행 없음을 감지해 재시도할 수 있는 최대 횟수. 넘으면 사용자에게 알리고 끝낸다. */
         private const val MAX_WATCHDOG_RETRIES = 3
@@ -1131,6 +1324,18 @@ class TestAccessibilityService : AccessibilityService() {
 
         /** 되묻기 답변을 이어붙인 goal의 길이 상한. */
         private const val MAX_GOAL_LENGTH = 300
+
+        /** 프리스크롤: 판단 전에 화면을 아래로 훑는 최대 페이지 수와 단계별 대기. */
+        private const val MAX_PRESCROLL_PAGES = 2
+        private const val PRESCROLL_STEP_DELAY_MS = 500L
+        private const val PRESCROLL_SETTLE_MS = 350L
+
+        /** [isSensitiveInputScreen]이 보는 민감 화면 키워드. 소문자·공백 제거 후 부분 일치.
+         * "인증"처럼 광범위한 단어는 일부러 뺐다 — 본인인증 '버튼'이 있는 일반 화면까지
+         * 잡아서 오버레이가 엉뚱하게 사라진다. */
+        private val SENSITIVE_SCREEN_KEYWORDS = setOf(
+            "비밀번호", "지문", "생체", "페이스아이디", "faceid",
+        )
 
         // 중단 명령 키워드/확인 응답 목록은 SpeechCommands로 옮겼다 — 단위 테스트가 붙어 있는
         // 쪽에 한 벌만 두어야 둘이 따로 놀지 않는다.

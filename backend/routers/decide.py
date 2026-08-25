@@ -12,6 +12,7 @@ from backend.services import prompt, safety
 from backend.services.ai_client import (
     AIClient,
     AIClientError,
+    ClaudeAIClient,
     GeminiAIClient,
     MockAIClient,
 )
@@ -32,7 +33,7 @@ _HISTORY_WORTHY_STATUSES = frozenset({"CONTINUE", "DONE"})
 
 
 @lru_cache(maxsize=1)
-def _build_ai_client(
+def _build_gemini_client(
     api_key: str | None, model: str, thinking_level: str, timeout_seconds: float
 ) -> AIClient:
     """클라이언트를 프로세스당 한 번만 만든다. 요청마다 생성하면 커넥션이 낭비된다."""
@@ -52,9 +53,44 @@ def _build_ai_client(
     )
 
 
+@lru_cache(maxsize=1)
+def _build_claude_client(
+    api_key: str | None, model: str, effort: str, max_tokens: int, timeout_seconds: float
+) -> AIClient:
+    if not api_key:
+        logger.warning("ANTHROPIC_API_KEY not set — falling back to MockAIClient")
+        return MockAIClient()
+
+    logger.info(
+        "using ClaudeAIClient",
+        extra={"model": model, "effort": effort, "timeout_s": timeout_seconds},
+    )
+    return ClaudeAIClient(
+        api_key=api_key,
+        model=model,
+        effort=effort,
+        max_tokens=max_tokens,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def get_ai_client(settings: Settings = Depends(get_settings)) -> AIClient:
-    """AI 클라이언트 주입 지점. 키가 없으면 Mock으로 폴백해 서버가 항상 뜨게 한다."""
-    return _build_ai_client(
+    """AI 클라이언트 주입 지점.
+
+    `AI_PROVIDER`로 추론 제공자를 고르고, **해당 제공자의 키가 없으면 Mock으로 폴백**한다
+    (키 없는 팀원도 서버를 띄울 수 있어야 하므로). 지금 어느 구현체로 돌고 있는지는
+    `/health`의 `ai_client` 필드로 확인할 수 있다 — Mock으로 조용히 떨어진 걸 눈치채지
+    못하면 시연 중 아무 버튼이나 누르는 그림이 나온다.
+    """
+    if settings.AI_PROVIDER == "claude":
+        return _build_claude_client(
+            settings.ANTHROPIC_API_KEY,
+            settings.CLAUDE_MODEL,
+            settings.CLAUDE_EFFORT,
+            settings.CLAUDE_MAX_TOKENS,
+            settings.CLAUDE_TIMEOUT_SECONDS,
+        )
+    return _build_gemini_client(
         settings.GEMINI_API_KEY,
         settings.GEMINI_MODEL,
         settings.GEMINI_THINKING_LEVEL,

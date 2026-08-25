@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 웨이크 이름('손자') 칩 배경 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@color/brand_orange" />
+    <corners android:radius="14dp" />
+</shape>

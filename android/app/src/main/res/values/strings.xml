@@ -7,8 +7,29 @@
     <string name="permission_button_microphone">마이크 허용</string>
     <string name="permission_button_overlay">다른 앱 위에 표시 허용</string>
 
+    <!-- 오버레이 (screen/폰 메인 화면 ver1 시안) -->
+    <string name="overlay_character_description">도우미 캐릭터</string>
+    <string name="overlay_stop_description">중단하기</string>
+    <string name="overlay_exit_description">종료하기</string>
+
     <!-- 멤버 A: 개인 테스트용 AccessibilityService (카카오톡 사진 전송 시나리오) -->
     <string name="test_accessibility_service_description">테스트용: 카카오톡 화면을 읽고 AI 지시에 따라 클릭합니다.</string>
+
+    <!-- 앱 메인 화면 (screen/InApp 시안) -->
+    <string name="main_header_title">사용자님</string>
+    <string name="main_header_greeting">안녕하세요</string>
+    <string name="main_headline_prefix">“안녕,</string>
+    <string name="main_headline_suffix">” 라고</string>
+    <string name="main_headline_line2">말해보세요!</string>
+    <string name="main_listening_title">듣고 있어요…</string>
+    <string name="main_card_idle_title">말씀만 하시면 돼요</string>
+    <string name="main_card_idle_caption">버튼을 누르지 않아도 듣고 있어요</string>
+    <string name="main_card_listening_title">지금 듣고 있어요</string>
+    <string name="main_card_listening_caption">말씀이 끝나면 자동으로 확인할게요</string>
+    <string name="main_edit_wake_name_title">부를 이름 바꾸기</string>
+
+    <!-- 로딩(스플래시) 화면 (screen/Loading Screen 시안) -->
+    <string name="loading_logo_description">효자손 로고</string>
 
     <!-- 멤버 A: MainActivity 웨이크 문구("안녕 손자") 설정 -->
     <string name="main_wake_name_label">\"안녕\" 뒤에 부를 이름</string>

@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 로딩(스플래시) 화면 (screen/Loading Screen 시안): 흰 배경 + 효자손 로고 + 이름 + 점 3개 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/white">
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:gravity="center_horizontal"
+        android:orientation="vertical">
+
+        <ImageView
+            android:layout_width="120dp"
+            android:layout_height="170dp"
+            android:contentDescription="@string/loading_logo_description"
+            android:scaleType="fitCenter"
+            android:src="@drawable/logo_hyojason" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/app_name"
+            android:textColor="@color/text_primary"
+            android:textSize="32sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <!-- 하단 점 3개 (밝기 차이로 진행감을 준다) -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="56dp"
+        android:orientation="horizontal">
+
+        <View
+            android:id="@+id/dot1"
+            android:layout_width="12dp"
+            android:layout_height="12dp"
+            android:alpha="0.35"
+            android:background="@drawable/bg_chip_orange" />
+
+        <View
+            android:id="@+id/dot2"
+            android:layout_width="12dp"
+            android:layout_height="12dp"
+            android:layout_marginStart="12dp"
+            android:alpha="0.6"
+            android:background="@drawable/bg_chip_orange" />
+
+        <View
+            android:id="@+id/dot3"
+            android:layout_width="12dp"
+            android:layout_height="12dp"
+            android:layout_marginStart="12dp"
+            android:background="@drawable/bg_chip_orange" />
+    </LinearLayout>
+
+</FrameLayout>

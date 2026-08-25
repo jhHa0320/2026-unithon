@@ -6,3 +6,6 @@ python-dotenv
 google-genai>=2.3
 pytest
 httpx
+anthropic>=1.0
+openai>=2
+python-multipart

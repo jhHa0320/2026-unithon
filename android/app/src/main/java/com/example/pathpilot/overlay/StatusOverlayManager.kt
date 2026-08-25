@@ -1,32 +1,27 @@
 package com.example.pathpilot.overlay
 
 import android.content.Context
-import android.graphics.Color
 import android.graphics.PixelFormat
-import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
-import android.widget.LinearLayout
+import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
+import com.example.pathpilot.R
 
 /**
- * 화면 위에 떠 있는 작은 상태 표시 오버레이.
+ * 자동화 진행 상태를 보여주는 오버레이 (screen/폰 메인 화면 ver1 시안).
  *
- * 두 가지 모드가 있다:
- * - [showOrUpdate]: 문구를 보여준다 (다음 동작 안내, 되묻는 질문, 사용자 답변 등).
- * - [showAnalyzing]: 문구 없이 돌아가는 스피너만 보여준다 — "지금 화면을 분석 중"이라는 뜻을
- *   아이콘으로만 전달한다. 화면 요소 개수 같은 세부 텍스트는 사용자에게 의미가 없어서 뺐다.
- *
- * 오버레이에는 "중단하기"/"종료하기" 버튼이 **항상** 함께 떠 있다(사용자 요구사항) —
- * 중단하기([onStopClicked])는 지금 하던 일을 멈추고 새 요청을 받는 용도,
- * 종료하기([onExitClicked])는 앱(접근성 서비스) 자체를 끄는 용도다.
+ * 화면 하단에 흰 말풍선 카드가 붙고, 카드 위로 캐릭터가 솟아 있다. 캐릭터의 표정은
+ * 상태에 따라 바뀐다([CharacterExpression] — 찾는 중/실행/되묻기 등). 카드 하단
+ * 좌우 모서리에 초록(중단하기)·빨강(종료하기) 원형 버튼이 항상 떠 있다(사용자 요구사항).
  */
 class StatusOverlayManager(context: Context) {
 
@@ -41,9 +36,10 @@ class StatusOverlayManager(context: Context) {
     private val windowManager =
         hostContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
-    private var rootView: LinearLayout? = null
-    private var textView: TextView? = null
-    private var spinner: ProgressBar? = null
+    private var rootView: View? = null
+    private var characterView: ImageView? = null
+    private var messageView: TextView? = null
+    private var spinnerView: ProgressBar? = null
 
     private val hideHandler = Handler(Looper.getMainLooper())
 
@@ -63,104 +59,54 @@ class StatusOverlayManager(context: Context) {
         return Settings.canDrawOverlays(appContext)
     }
 
-    /** 오버레이가 없으면 만들고, 있으면 텍스트 모드로 갱신한다. 버튼 두 개는 항상 떠 있다. */
-    fun showOrUpdate(message: String) {
+    /**
+     * 오버레이가 없으면 만들고, 있으면 문구/표정을 갱신한다. 버튼 두 개는 항상 떠 있다.
+     * [expression]이 null이면 표정은 바꾸지 않는다 — 문구만 갱신하는 호출부가 직전 표정을
+     * 일일이 기억할 필요가 없게.
+     */
+    fun showOrUpdate(message: String, expression: CharacterExpression? = null) {
         ensureViews()
         hideHandler.removeCallbacksAndMessages(null)
-        spinner?.visibility = View.GONE
-        textView?.apply {
+        spinnerView?.visibility = View.GONE
+        messageView?.apply {
             visibility = View.VISIBLE
             text = message
         }
+        expression?.let { characterView?.setImageResource(it.drawableRes) }
     }
 
-    /** 텍스트 없이 스피너만 보여준다 — "실시간으로 분석 중"이라는 걸 아이콘으로만 알린다. */
+    /** 문구 대신 스피너를 보여준다 — "실시간으로 분석 중"이라는 걸 아이콘으로만 알린다. */
     fun showAnalyzing() {
         ensureViews()
         hideHandler.removeCallbacksAndMessages(null)
-        textView?.visibility = View.GONE
-        spinner?.visibility = View.VISIBLE
+        messageView?.visibility = View.GONE
+        spinnerView?.visibility = View.VISIBLE
+        characterView?.setImageResource(CharacterExpression.FOCUSED.drawableRes)
     }
 
     private fun ensureViews() {
         if (rootView != null) return
 
-        val text = TextView(appContext).apply {
-            setTextColor(Color.WHITE)
-            textSize = 20f
-            setPadding(0, 0, 0, 0)
+        val view = LayoutInflater.from(hostContext).inflate(R.layout.overlay_status, null)
+        characterView = view.findViewById(R.id.overlay_character)
+        messageView = view.findViewById(R.id.overlay_message)
+        spinnerView = view.findViewById(R.id.overlay_spinner)
+        view.findViewById<ImageView>(R.id.overlay_btn_stop).setOnClickListener {
+            onStopClicked?.invoke()
         }
-        val progress = ProgressBar(appContext).apply {
-            isIndeterminate = true
-            indeterminateDrawable?.setTint(Color.WHITE)
-            visibility = View.GONE
-        }
-        fun makeButton(label: String, bgColor: String, onClick: () -> Unit) =
-            TextView(appContext).apply {
-                // 바깥의 `val text`(메시지 TextView)가 프로퍼티를 가리므로 this를 명시한다.
-                this.text = label
-                setTextColor(Color.WHITE)
-                textSize = 18f
-                setPadding(36, 18, 36, 18)
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.RECTANGLE
-                    cornerRadius = 28f
-                    setColor(Color.parseColor(bgColor))
-                }
-                setOnClickListener { onClick() }
-            }
-
-        val stop = makeButton("중단하기", "#E6E07A1F") { onStopClicked?.invoke() }
-        val exit = makeButton("종료하기", "#E6B3261E") { onExitClicked?.invoke() }
-
-        val statusRow = LinearLayout(appContext).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(
-                progress,
-                LinearLayout.LayoutParams(72, 72).apply { marginEnd = 24 },
-            )
-            addView(text, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        }
-        val buttonRow = LinearLayout(appContext).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(stop, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-            addView(
-                exit,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ).apply { marginStart = 24 },
-            )
-        }
-        // 문구가 길어져도 버튼이 화면 밖으로 밀리지 않게 문구 줄과 버튼 줄을 세로로 나눈다.
-        val container = LinearLayout(appContext).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(36, 24, 36, 24)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = 32f
-                setColor(Color.parseColor("#E6222222"))
-            }
-            addView(statusRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-            addView(
-                buttonRow,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = 20 },
-            )
+        view.findViewById<ImageView>(R.id.overlay_btn_exit).setOnClickListener {
+            onExitClicked?.invoke()
         }
 
-        if (!attach(container)) {
+        if (!attach(view)) {
             // 붙이지 못했으면 참조를 남기지 않는다 — 다음 showOrUpdate에서 다시 시도하게 된다.
             // (권한을 나중에 켜거나 일시적인 토큰 문제였던 경우 저절로 복구된다.)
+            characterView = null
+            messageView = null
+            spinnerView = null
             return
         }
-        rootView = container
-        textView = text
-        spinner = progress
+        rootView = view
     }
 
     /**
@@ -191,15 +137,18 @@ class StatusOverlayManager(context: Context) {
         for (overlayType in candidates) {
             // FLAG_NOT_TOUCHABLE을 걸면 "중단하기" 버튼이 눌리지 않는다. FLAG_NOT_FOCUSABLE만 남겨
             // 오버레이 영역 안의 터치만 받고 키 입력/포커스는 뒤 앱에 그대로 넘긴다.
+            // 시안대로 화면 폭 전체를 쓰고 하단에 붙인다.
             val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 overlayType,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT,
             ).apply {
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                y = 96
+                gravity = Gravity.BOTTOM
+                // 하단바(뒤로가기·홈)를 가리면 사용자가 시스템 내비게이션을 못 쓴다.
+                // 창 전체를 내비게이션 바 높이만큼 위로 올려서 그 영역을 비워 둔다.
+                y = navigationBarHeight()
             }
 
             val result = runCatching { windowManager.addView(container, params) }
@@ -218,17 +167,31 @@ class StatusOverlayManager(context: Context) {
         return false
     }
 
+    /**
+     * 시스템 내비게이션 바 높이. 3버튼/제스처 어느 쪽이든 시스템 리소스가 현재 모드의 값을 준다.
+     * 리소스가 없으면(일부 제스처 전용 기기) 소량의 기본 여백을 쓴다.
+     */
+    private fun navigationBarHeight(): Int {
+        val resId = hostContext.resources.getIdentifier("navigation_bar_height", "dimen", "android")
+        if (resId > 0) return hostContext.resources.getDimensionPixelSize(resId)
+        return (FALLBACK_NAV_CLEARANCE_DP * hostContext.resources.displayMetrics.density).toInt()
+    }
+
     fun hide() {
         hideHandler.removeCallbacksAndMessages(null)
         rootView?.let {
             runCatching { windowManager.removeView(it) }
         }
         rootView = null
-        textView = null
-        spinner = null
+        characterView = null
+        messageView = null
+        spinnerView = null
     }
 
     private companion object {
         const val TAG = "StatusOverlay"
+
+        /** navigation_bar_height 리소스가 없을 때 쓰는 하단 여백(dp). */
+        const val FALLBACK_NAV_CLEARANCE_DP = 24
     }
 }

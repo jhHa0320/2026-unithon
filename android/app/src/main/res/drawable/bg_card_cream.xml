@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 하단 안내 카드 / 오버레이 말풍선 카드 공통 배경 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@color/card_cream" />
+    <corners android:radius="28dp" />
+</shape>

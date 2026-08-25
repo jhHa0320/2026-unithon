@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 캐릭터 뒤 은은한 라디얼 글로우 (InApp 시안의 주광 효과) -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <gradient
+        android:type="radial"
+        android:gradientRadius="55%p"
+        android:startColor="@color/glow_center"
+        android:endColor="#00F0D2B4" />
+</shape>
