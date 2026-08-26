@@ -118,6 +118,13 @@ class TestAccessibilityService : AccessibilityService() {
      */
     private var lastScreenFingerprint: Int? = null
 
+    /**
+     * 체크박스 화면 안정화 게이트 상태([collectAndDecide] 참고). 직전 확인 스캔의 지문과
+     * 재시도 횟수 — 같은 지문이 두 번 연속 나오면 화면이 정착한 것으로 보고 판단을 허용한다.
+     */
+    private var stabilityProbeFingerprint: Int? = null
+    private var stabilityRetries = 0
+
     /** 판단 전에 화면을 아래까지 훑는 프리스크롤이 진행 중인지. 이 동안 들어오는 접근성
      * 이벤트는 우리가 만든 스크롤의 메아리이므로 새 스캔을 예약하지 않는다. */
     private var isPrescrolling = false
@@ -316,6 +323,8 @@ class TestAccessibilityService : AccessibilityService() {
         // 세션이 바뀌면 직전 화면과의 비교는 의미가 없다. 남겨두면 새 세션의 첫 스캔이
         // "직전과 같은 화면"으로 오인돼 통째로 건너뛰어진다.
         lastScreenFingerprint = null
+        stabilityProbeFingerprint = null
+        stabilityRetries = 0
         disarmWatchdog()
         cancelAnalyzingIndicator()
         // nodeMap은 AccessibilityNodeInfo(= 시스템과의 IPC 핸들)를 화면 하나당 수백 개까지
@@ -608,6 +617,7 @@ class TestAccessibilityService : AccessibilityService() {
         val scrollable: Boolean,
         val viewId: String?,
         val isPassword: Boolean,
+        val checked: Boolean?,
         val bounds: Rect,
     )
 
@@ -648,6 +658,26 @@ class TestAccessibilityService : AccessibilityService() {
         }
 
         val candidates = collectCandidates(root)
+
+        // 결제 동의처럼 체크박스가 있는 화면은 확인 팝업이 여닫히는 전환 애니메이션 중간에
+        // 읽으면 체크 상태가 실제와 어긋난다 — LLM이 그 낡은 상태를 근거로 체크를 다시 눌러
+        // 토글 해제되는 사고(코레일 실측). 연속 두 번 같은 지문이 나올 때까지 판단을 미룬다.
+        // 체크박스가 없는 화면은 이 게이트를 타지 않으므로 전체 반응 속도에는 영향이 없다.
+        if (userSpeech == null && candidates.any { it.checked != null }) {
+            val stabilityKey = stabilityFingerprintOf(candidates)
+            if (stabilityKey != stabilityProbeFingerprint && stabilityRetries < MAX_STABILITY_RETRIES) {
+                stabilityProbeFingerprint = stabilityKey
+                stabilityRetries++
+                Log.d(TAG, "체크 화면 안정화 확인 $stabilityRetries/$MAX_STABILITY_RETRIES — ${STABILITY_GAP_MS}ms 후 재확인")
+                pendingCollect?.let { debounceHandler.removeCallbacks(it) }
+                val runnable = Runnable { collectAndDecide(userSpeech) }
+                pendingCollect = runnable
+                debounceHandler.postDelayed(runnable, STABILITY_GAP_MS)
+                return
+            }
+        }
+        stabilityProbeFingerprint = null
+        stabilityRetries = 0
 
         // 화면 민감도에 따라 오버레이/자동화를 조절한다.
         // - FULL_PAUSE(비밀번호·생체): 오버레이를 걷고 자동 조작도 멈춘다 — 사용자가 직접 입력.
@@ -738,6 +768,9 @@ class TestAccessibilityService : AccessibilityService() {
                             scrollable = node.isScrollable,
                             viewId = node.viewIdResourceName,
                             isPassword = node.isPassword,
+                            // 체크박스류만 상태를 싣는다 — LLM이 이미 체크된 것을 다시 눌러
+                            // 토글 해제하는 사고(코레일 결제 동의 실측)를 막는 근거.
+                            checked = if (node.isCheckable) node.isChecked else null,
                             bounds = bounds,
                         ),
                     )
@@ -754,6 +787,15 @@ class TestAccessibilityService : AccessibilityService() {
     /** 프리스크롤 반복 여부를 판정하는 화면 지문. 라벨 구성만 본다(스크롤로 좌표가 변해도 동일). */
     private fun prescrollFingerprintOf(candidates: List<Candidate>): Int =
         candidates.joinToString("|") { "${it.text}${it.description}${it.viewId}" }.hashCode()
+
+    /**
+     * 화면 안정화 판정용 지문. bounds까지 포함해 팝업 여닫힘 애니메이션 중의 미세한 좌표
+     * 변화도 "아직 움직이는 중"으로 잡는다 — 같은 값이 두 번 연속 나와야 정착으로 본다.
+     */
+    private fun stabilityFingerprintOf(candidates: List<Candidate>): Int =
+        candidates.joinToString("|") {
+            "${it.text}${it.description}${it.viewId}${it.checked}${it.bounds}"
+        }.hashCode()
 
     /** 프리스크롤 누적 병합용 키. 같은 항목이 스크롤로 좌표만 바뀐 경우를 하나로 본다. */
     private fun mergeKeyOf(candidate: Candidate): String =
@@ -860,6 +902,7 @@ class TestAccessibilityService : AccessibilityService() {
                 clickable = candidate.clickable,
                 scrollable = candidate.scrollable,
                 view_id = candidate.viewId,
+                checked = candidate.checked,
                 bounds = listOf(
                     candidate.bounds.left,
                     candidate.bounds.top,
@@ -964,7 +1007,7 @@ class TestAccessibilityService : AccessibilityService() {
      * 달라지는 문제는 [settleUntil] 대기가 먼저 막아준다.
      */
     private fun fingerprintOf(elements: List<ElementDTO>): Int = elements.joinToString("|") {
-        "${it.text}${it.content_description}${it.view_id}${it.clickable}${it.scrollable}${it.bounds}"
+        "${it.text}${it.content_description}${it.view_id}${it.clickable}${it.scrollable}${it.checked}${it.bounds}"
     }.hashCode()
 
     /**
@@ -1079,6 +1122,15 @@ class TestAccessibilityService : AccessibilityService() {
         if (message.isNotBlank() && message == lastProgressMessage) {
             progressRepeatCount++
             effective = WAITING_PHRASES[(progressRepeatCount - 1) % WAITING_PHRASES.size]
+            // 대기 문구는 첫 한 번만 소리로 낸다. 반복마다 큐(QUEUE_ADD)에 쌓으면 오디오가
+            // 화면보다 몇 스텝 뒤처져, 이미 지나간 단계의 멘트가 뒤늦게 나오는 불일치가
+            // 생긴다(2026-08-26 결제 화면 실측). 이후 반복은 오버레이 문구만 갱신하고
+            // 후속 동작은 바로 실행한다 — 진행 속도도 그만큼 빨라진다.
+            if (progressRepeatCount >= 2) {
+                overlay.showOrUpdate(effective, CharacterExpression.FOCUSED)
+                onSpoken?.invoke()
+                return
+            }
         } else {
             progressRepeatCount = 0
             lastProgressMessage = message.ifBlank { null }
@@ -1271,6 +1323,9 @@ class TestAccessibilityService : AccessibilityService() {
         // 이 대상의 시그니처. 노드 id는 스캔마다 바뀌므로 내용 기반으로 만든다.
         val actionKey = "${node.viewIdResourceName}|${node.text}|${node.contentDescription}|${response.action_type}"
 
+        // 체크박스류는 클릭 후 상태가 실제로 뒤집힌 것을 확인하고 나서 다음 판단으로 넘어간다.
+        val wasChecked = if (node.isCheckable) node.isChecked else null
+
         val actionResult = when (response.action_type) {
             ActionType.CLICK ->
                 if (actionKey == ineffectiveActionKey) {
@@ -1297,17 +1352,55 @@ class TestAccessibilityService : AccessibilityService() {
         Log.i(TAG, "performAction 결과: $actionResult (id=${response.target_node_id})")
         if (actionResult) {
             pendingActionKey = actionKey
-            // 방금 화면을 건드렸다. 전환이 끝나기 전에 읽으면 이전 화면과 새 화면이 섞인
-            // 중간 상태를 보게 되므로, 이 시간 동안은 스캔을 막는다.
-            val settleDelay = settleDelayFor(response.action_type)
-            settleUntil = SystemClock.uptimeMillis() + settleDelay
-            Log.d(TAG, "화면 정착 대기 ${settleDelay}ms (action=${response.action_type})")
+            if (wasChecked != null && response.action_type == ActionType.CLICK) {
+                // 체크박스 클릭: 고정 시간 대기 대신 isChecked가 실제로 뒤집힐 때까지 폴링한다.
+                // 시간이 아니라 상태를 기준으로 다음 스캔을 여는 것이 핵심 — 확인 팝업이 뜨는
+                // 경우(상태가 안 뒤집힘)는 타임아웃 후 일반 흐름으로 넘어가 팝업을 처리한다.
+                settleUntil = SystemClock.uptimeMillis() + CHECK_CONFIRM_POLL_MS * (CHECK_CONFIRM_MAX_POLLS + 2)
+                debounceHandler.postDelayed(
+                    { awaitCheckToggle(node, wasChecked, attempt = 1) },
+                    CHECK_CONFIRM_POLL_MS,
+                )
+            } else {
+                // 방금 화면을 건드렸다. 전환이 끝나기 전에 읽으면 이전 화면과 새 화면이 섞인
+                // 중간 상태를 보게 되므로, 이 시간 동안은 스캔을 막는다.
+                val settleDelay = settleDelayFor(response.action_type)
+                settleUntil = SystemClock.uptimeMillis() + settleDelay
+                Log.d(TAG, "화면 정착 대기 ${settleDelay}ms (action=${response.action_type})")
+            }
             // 화면이 곧 바뀔 것으로 기대한다. 안 바뀌면 워치독이 스스로 다시 스캔한다.
             armWatchdog()
         } else {
             Log.w(TAG, "performAction 실패 — 이 스텝은 화면에 아무 영향을 못 줬을 것")
             notifyAndRetry("잘 안 눌렸어요. 다시 해볼게요.")
         }
+    }
+
+    /**
+     * 체크박스 클릭이 실제 상태 변화([AccessibilityNodeInfo.isChecked] 반전)로 반영됐는지
+     * 폴링으로 확인한다. 반영이 확인되면 짧은 정착 후 곧장 재판단을 건다.
+     *
+     * 확인 팝업이 뜨는 체크박스(코레일 결제 동의)는 팝업을 닫아야 상태가 뒤집히므로 여기서는
+     * 타임아웃이 난다 — 그 경우 일반 재스캔으로 넘어가 팝업의 확인 버튼을 처리하게 한다.
+     */
+    private fun awaitCheckToggle(node: AccessibilityNodeInfo, wasChecked: Boolean, attempt: Int) {
+        if (!isSessionActive) return
+
+        val flipped = node.refresh() && node.isChecked != wasChecked
+        if (flipped) {
+            Log.i(TAG, "체크 상태 반영 확인 ($wasChecked -> ${node.isChecked}) — 폴링 ${attempt}회")
+            settleUntil = SystemClock.uptimeMillis() + CHECK_CONFIRM_SETTLE_MS
+            debounceHandler.postDelayed({ collectAndDecide(null) }, CHECK_CONFIRM_SETTLE_MS)
+            return
+        }
+        if (attempt >= CHECK_CONFIRM_MAX_POLLS) {
+            Log.i(TAG, "체크 반영 미확인(확인 팝업 가능성) — 일반 재스캔으로 진행")
+            settleUntil = SystemClock.uptimeMillis() + CHECK_CONFIRM_SETTLE_MS
+            debounceHandler.postDelayed({ collectAndDecide(null) }, CHECK_CONFIRM_SETTLE_MS)
+            return
+        }
+        settleUntil = SystemClock.uptimeMillis() + CHECK_CONFIRM_POLL_MS * 2
+        debounceHandler.postDelayed({ awaitCheckToggle(node, wasChecked, attempt + 1) }, CHECK_CONFIRM_POLL_MS)
     }
 
     /**
@@ -1465,6 +1558,16 @@ class TestAccessibilityService : AccessibilityService() {
         private const val SETTLE_DELAY_CLICK_MS = 800L
         private const val SETTLE_DELAY_SET_TEXT_MS = 1_000L
         private const val SETTLE_DELAY_SCROLL_MS = 1_200L
+
+        /** 체크박스 클릭 후 isChecked 반전을 확인하는 폴링 간격/횟수([awaitCheckToggle]). */
+        private const val CHECK_CONFIRM_POLL_MS = 250L
+        private const val CHECK_CONFIRM_MAX_POLLS = 10
+        /** 반전 확인(또는 타임아웃) 후 재판단까지의 짧은 정착 시간. */
+        private const val CHECK_CONFIRM_SETTLE_MS = 400L
+
+        /** 체크박스 화면 안정화 게이트: 재확인 간격과 무한 대기 방지 상한. */
+        private const val STABILITY_GAP_MS = 350L
+        private const val MAX_STABILITY_RETRIES = 6
 
         /** 이보다 오래 걸리는 요청에만 "분석 중" 스피너를 보여준다. */
         private const val ANALYZING_INDICATOR_DELAY_MS = 3000L

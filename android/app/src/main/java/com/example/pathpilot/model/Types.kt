@@ -24,6 +24,9 @@ data class ElementDTO(
     /** 안드로이드 resource-id(`viewIdResourceName`, 예: `com.kakao.talk:id/btn_send`).
      * 아이콘만 있어 text·contentDescription이 모두 빈 버튼을 LLM이 식별하는 가장 강한 단서다. */
     val view_id: String? = null,
+    /** 체크 가능한 위젯(체크박스 등)의 현재 상태. 체크 불가 요소는 null — LLM이 이미
+     * 체크된 것을 다시 눌러 토글 해제하는 사고를 막는 근거다. */
+    val checked: Boolean? = null,
     val bounds: List<Int>,
 )
 

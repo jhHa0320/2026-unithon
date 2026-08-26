@@ -18,6 +18,10 @@ class ElementDTO(BaseModel):
     # 전송/첨부 버튼은 text도 contentDescription도 비어 있는 경우가 많다.
     # 없는 노드도 많으므로 선택 필드.
     view_id: str | None = None
+    # 체크 가능한 위젯(체크박스·스위치·라디오)의 현재 상태. 체크 불가 요소는 None.
+    # 이 정보가 없으면 LLM이 "이미 체크됐는지"를 알 수 없어, 안전하게 다시 누르려다
+    # 토글로 해제해 버린다(코레일 결제 동의에서 실측).
+    checked: bool | None = None
     bounds: list[int]  # [left, top, right, bottom]
 
     @field_validator("bounds")
